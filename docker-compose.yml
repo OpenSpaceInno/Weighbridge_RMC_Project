@@ -1,0 +1,137 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # 1. FRONTEND SERVICE (Vite React + Nginx Reverse Proxy)
+  # ============================================================================
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: rmc-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      - backend
+    networks:
+      - rmc-network
+    # Labels for Coolify / Traefik SSL & Domain configuration (optional, active when Traefik is present)
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${DOMAIN:-localhost}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls=true"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+  # ============================================================================
+  # 2. BACKEND API SERVICE (Node.js Express + MySQL Client)
+  # ============================================================================
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: rmc-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_HOST=database
+      - DB_PORT=3306
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-root}
+      - DB_NAME=${DB_NAME:-rmc_gate_system}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+    volumes:
+      - rmc_snapshots:/app/public/snapshots
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - rmc-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${API_DOMAIN:-api.localhost}`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls=true"
+      - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.backend.loadbalancer.server.port=3001"
+
+  # ============================================================================
+  # 3. DATABASE SERVICE (MySQL 8.0 with Persistent Storage & Preloaded Schema)
+  # ============================================================================
+  database:
+    image: mysql:8.0
+    container_name: rmc-database
+    restart: unless-stopped
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --max_connections=500
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_NAME:-rmc_gate_system}
+    volumes:
+      - rmc_mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "${DB_EXTERNAL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - rmc-network
+
+  # ============================================================================
+  # 4. PHPMYADMIN SERVICE (Web-based Database Management)
+  # ============================================================================
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: rmc-phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: database
+      PMA_PORT: 3306
+      PMA_ARBITRARY: 0
+      UPLOAD_LIMIT: 128M
+      MEMORY_LIMIT: 256M
+      PMA_ABSOLUTE_URI: ${PMA_ABSOLUTE_URI:-}
+    ports:
+      - "${PMA_PORT:-8081}:80"
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - rmc-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pma.rule=Host(`${PMA_DOMAIN:-pma.localhost}`)"
+      - "traefik.http.routers.pma.entrypoints=websecure"
+      - "traefik.http.routers.pma.tls=true"
+      - "traefik.http.routers.pma.tls.certresolver=letsencrypt"
+      - "traefik.http.services.pma.loadbalancer.server.port=80"
+
+# ==============================================================================
+# Persistent Named Volumes
+# ==============================================================================
+volumes:
+  rmc_mysql_data:
+    driver: local
+  rmc_snapshots:
+    driver: local
+
+# ==============================================================================
+# Bridge Network for Inter-container Communication
+# ==============================================================================
+networks:
+  rmc-network:
+    driver: bridge

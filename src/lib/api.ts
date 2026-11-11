@@ -3,8 +3,9 @@ const getApiBaseUrl = () => {
   if (import.meta.env.VITE_API_URL) {
     return import.meta.env.VITE_API_URL;
   }
-  if (typeof window !== 'undefined' && window.location && window.location.hostname) {
-    return window.location.protocol + '//' + window.location.hostname + ':3001/api';
+  // In browser environments (both local Vite dev proxy and production Nginx/Traefik reverse proxy)
+  if (typeof window !== 'undefined' && window.location) {
+    return '/api';
   }
   return 'http://localhost:3001/api';
 };
@@ -20,10 +21,12 @@ class ApiClient {
 
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${endpoint}`;
+    const token = typeof window !== 'undefined' ? localStorage.getItem('rmc_auth_token') : null;
     const response = await fetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         ...options?.headers,
       },
     });

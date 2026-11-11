@@ -28,8 +28,56 @@ const upload = multer({
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
+// Trust reverse proxy for HTTPS termination (Coolify / Traefik / Nginx / Cloudflare)
+app.set('trust proxy', 1);
+
+// Configure CORS for HTTPS, custom domains, credentials, and preflight
+const allowedOrigins = process.env.CORS_ORIGIN
+  ? process.env.CORS_ORIGIN.split(',').map(s => s.trim())
+  : null;
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow non-browser requests (mobile, curl, postman, server-to-server)
+    if (!origin) return callback(null, true);
+
+    // If explicit list configured and contains origin or '*'
+    if (allowedOrigins && (allowedOrigins.includes('*') || allowedOrigins.includes(origin))) {
+      return callback(null, true);
+    }
+
+    // Default: dynamically reflect origin to support HTTPS domains and subdomains
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Origin',
+    'X-Requested-With',
+    'Content-Type',
+    'Accept',
+    'Authorization',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers',
+    'X-Plant-Id',
+    'X-Terminal-Id'
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
+// Explicit preflight and security headers middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '50mb' })); // Increase limit for image uploads
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/snapshots', express.static(snapshotsDir));
@@ -284,7 +332,8 @@ app.post('/api/network-config', async (req, res) => {
 app.post('/api/anpr/init', async (req, res) => {
   try {
     const fs = await import('fs/promises');
-    const sql = await fs.readFile('./migrations/anpr_events.sql', 'utf8');
+    const migrationPath = path.resolve(__dirname, 'migrations', 'anpr_events.sql');
+    const sql = await fs.readFile(migrationPath, 'utf8');
     const statements = sql.split(';').filter(stmt => stmt.trim());
     
     for (const statement of statements) {
