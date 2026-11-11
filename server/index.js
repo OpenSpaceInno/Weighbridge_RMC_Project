@@ -3269,12 +3269,27 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ error: 'Username and password are required' });
     }
 
-    const [users] = await pool.query(
-      'SELECT * FROM users WHERE (username = ? OR email = ?)',
-      [username.trim(), username.trim()]
-    );
+    let users;
+    try {
+      [users] = await pool.query(
+        'SELECT * FROM users WHERE (username = ? OR email = ?)',
+        [username.trim(), username.trim()]
+      );
+    } catch (queryErr) {
+      // Auto-heal: If users table doesn't exist, initialize database immediately
+      if (queryErr.code === 'ER_NO_SUCH_TABLE') {
+        console.warn('⚠️ Users table not found. Auto-initializing database schema...');
+        await initializeDatabase();
+        [users] = await pool.query(
+          'SELECT * FROM users WHERE (username = ? OR email = ?)',
+          [username.trim(), username.trim()]
+        );
+      } else {
+        throw queryErr;
+      }
+    }
 
-    if (users.length === 0) {
+    if (!users || users.length === 0) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
@@ -3288,30 +3303,40 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Update last login
-    await pool.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+    try {
+      await pool.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+    } catch (e) {}
 
     // Fetch user role
-    const [roles] = await pool.query('SELECT * FROM roles WHERE id = ?', [user.role_id]);
-    const role = roles.length > 0 ? roles[0] : {
+    let role = {
       id: user.role_id,
       name: user.role_name,
       modules: ['/'],
       permissions: []
     };
 
+    try {
+      const [roles] = await pool.query('SELECT * FROM roles WHERE id = ?', [user.role_id]);
+      if (roles.length > 0) {
+        role = roles[0];
+      }
+    } catch (e) {}
+
     const token = createSessionToken(user);
 
-    // Record login in audit_logs
-    await pool.query(
-      `INSERT INTO audit_logs (id, timestamp, module, action, entity_id, entity_type, performed_by, details, severity, created_at)
-       VALUES (?, NOW(), 'auth', 'LOGIN', ?, 'User Session', ?, ?, 'info', NOW())`,
-      [
-        `aud-${Date.now()}`,
-        user.id,
-        JSON.stringify({ id: user.id, name: user.name, role: user.role_name }),
-        `User ${user.username} logged in successfully from IP ${req.ip || '127.0.0.1'}`
-      ]
-    );
+    // Record login in audit_logs (safe fallback)
+    try {
+      await pool.query(
+        `INSERT INTO audit_logs (id, timestamp, module, action, entity_id, entity_type, performed_by, details, severity, created_at)
+         VALUES (?, NOW(), 'auth', 'LOGIN', ?, 'User Session', ?, ?, 'info', NOW())`,
+        [
+          `aud-${Date.now()}`,
+          user.id,
+          JSON.stringify({ id: user.id, name: user.name, role: user.role_name }),
+          `User ${user.username} logged in successfully from IP ${req.ip || '127.0.0.1'}`
+        ]
+      );
+    } catch (e) {}
 
     res.json({
       success: true,

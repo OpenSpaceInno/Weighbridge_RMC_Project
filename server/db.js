@@ -1,7 +1,13 @@
 import mysql from 'mysql2/promise';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Create connection pool (without database selection initially)
 const poolWithoutDb = mysql.createPool({
@@ -11,7 +17,8 @@ const poolWithoutDb = mysql.createPool({
   password: process.env.DB_PASSWORD || '',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  multipleStatements: true
 });
 
 // Create connection pool (with database)
@@ -20,18 +27,20 @@ const pool = mysql.createPool({
   port: process.env.DB_PORT || 3306,
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'RMC-SAAS',
+  database: process.env.DB_NAME || 'rmc_gate_system',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  queueLimit: 0,
+  multipleStatements: true
 });
 
 // Test connection
 async function testConnection() {
+  const dbName = process.env.DB_NAME || 'rmc_gate_system';
   try {
     // First, create database if it doesn't exist
     const connection = await poolWithoutDb.getConnection();
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${process.env.DB_NAME || 'RMC-SAAS'}\``);
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
     connection.release();
     
     // Then test connection to the database
@@ -47,17 +56,134 @@ async function testConnection() {
 
 // Initialize database and tables
 async function initializeDatabase() {
+  const dbName = process.env.DB_NAME || 'rmc_gate_system';
   try {
     const connection = await poolWithoutDb.getConnection();
     
     // Create database if it doesn't exist
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${process.env.DB_NAME || 'RMC-SAAS'}\``);
-    console.log(`✅ Database '${process.env.DB_NAME}' ready`);
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``);
+    console.log(`✅ Database '${dbName}' ready`);
     connection.release();
     
     // Now use the database connection pool
     const dbConnection = await pool.getConnection();
+
+    // Check if the users table already exists
+    const [userTables] = await dbConnection.query(
+      "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users'",
+      [dbName]
+    );
+
+    // If users table is missing, run full schema initialization from init.sql
+    if (userTables.length === 0) {
+      console.log('🔄 Core tables missing. Initializing complete schema from init.sql...');
+      const initSqlPath = path.resolve(__dirname, 'init.sql');
+      if (fs.existsSync(initSqlPath)) {
+        try {
+          let sqlContent = fs.readFileSync(initSqlPath, 'utf8');
+          if (dbName !== 'rmc_gate_system') {
+            sqlContent = sqlContent.replace(/`rmc_gate_system`/g, `\`${dbName}\``);
+          }
+          await dbConnection.query(sqlContent);
+          console.log('✅ Complete schema & seed data initialized from init.sql!');
+        } catch (sqlErr) {
+          console.error('⚠️ Warning executing init.sql batch:', sqlErr.message);
+        }
+      }
+    }
     
+    // Ensure roles table exists
+    await dbConnection.query(`
+      CREATE TABLE IF NOT EXISTS roles (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(128) NOT NULL,
+        description TEXT,
+        color VARCHAR(32) DEFAULT 'blue',
+        modules JSON,
+        permissions JSON,
+        is_system BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // Ensure default admin role exists
+    await dbConnection.query(`
+      INSERT INTO roles (id, name, description, color, modules, permissions, is_system)
+      VALUES (
+        'admin',
+        'Plant Head / Admin',
+        'Executive leadership with comprehensive plant-wide visibility, multi-camera CCTV wall, all operational modules, and configuration overrides.',
+        'purple',
+        '["/","/gate-monitor","/weighbridge","/loading","/dispatch","/trips","/trip-tracking","/trip-analytics","/exit-verification","/incidents","/audit-logs","/vehicles","/drivers","/fuel","/maintenance","/billing","/inventory","/reports","/customer-portal","/device-config","/database-setup","/users","/roles"]',
+        '["all:manage","users:manage","roles:manage","config:manage","reports:export","override:approve"]',
+        TRUE
+      )
+      ON DUPLICATE KEY UPDATE name=VALUES(name);
+    `);
+
+    // Ensure users table exists
+    await dbConnection.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id VARCHAR(64) PRIMARY KEY,
+        username VARCHAR(64) UNIQUE NOT NULL,
+        name VARCHAR(128) NOT NULL,
+        email VARCHAR(128) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role_id VARCHAR(64) NOT NULL,
+        role_name VARCHAR(128) NOT NULL,
+        phone VARCHAR(32),
+        department VARCHAR(64),
+        shift VARCHAR(64),
+        status VARCHAR(32) DEFAULT 'active',
+        avatar VARCHAR(255),
+        last_login TIMESTAMP NULL,
+        plant_id VARCHAR(64) DEFAULT 'PL01',
+        plant_name VARCHAR(128) DEFAULT 'Plant 01 • Shamshabad Central',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_users_role (role_id),
+        INDEX idx_users_status (status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    // Ensure default users exist
+    await dbConnection.query(`
+      INSERT INTO users (id, username, name, email, password_hash, role_id, role_name, status)
+      VALUES 
+        ('USR-001', 'admin', 'Rajesh Sharma', 'admin@aparnarmc.com', 'admin123', 'admin', 'Plant Manager / Admin', 'active'),
+        ('USR-002', 'gate.security', 'Mahesh Patil', 'security@aparnarmc.com', 'gate123', 'gate_operator', 'Gate Security Supervisor', 'active'),
+        ('USR-003', 'weighbridge.op', 'Ramesh Kulkarni', 'weighbridge@aparnarmc.com', 'scale123', 'weighbridge_operator', 'Weighbridge Scale Operator', 'active'),
+        ('USR-003B', 'weigh_op', 'Ramesh Kulkarni', 'weigh_op@aparna-rmc.com', 'weigh123', 'weighbridge_operator', 'Weighbridge Scale Operator', 'active'),
+        ('USR-004', 'batching.supv', 'Anil Desai', 'batching@aparnarmc.com', 'batch123', 'batching_operator', 'Batching Plant Supervisor', 'active'),
+        ('USR-005', 'qc.inspector', 'Vikram Joshi', 'qc@aparnarmc.com', 'qc123', 'qc_inspector', 'Quality Control Lead', 'active'),
+        ('USR-006', 'dispatch.lead', 'Amitabh Verma', 'dispatch@aparnarmc.com', 'dispatch123', 'dispatch_officer', 'Dispatch & Logistics Officer', 'active'),
+        ('USR-007', 'fleet.mgr', 'Sunil Shinde', 'fleet@aparnarmc.com', 'fleet123', 'fleet_manager', 'Fleet & Workshop Manager', 'active'),
+        ('USR-008', 'billing.acc', 'Pooja Hegde', 'billing@aparnarmc.com', 'billing123', 'accounts_manager', 'Commercial & Accounts Lead', 'active')
+      ON DUPLICATE KEY UPDATE password_hash=VALUES(password_hash), status='active';
+    `);
+
+    // Ensure audit_logs table exists
+    await dbConnection.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id VARCHAR(64) PRIMARY KEY,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        module VARCHAR(64) NOT NULL,
+        action VARCHAR(64) NOT NULL,
+        entity_id VARCHAR(128),
+        entity_type VARCHAR(128),
+        performed_by JSON,
+        details TEXT,
+        severity VARCHAR(32) DEFAULT 'info',
+        user_id VARCHAR(64),
+        user_name VARCHAR(128),
+        status VARCHAR(32) DEFAULT 'SUCCESS',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_audit_module (module),
+        INDEX idx_audit_timestamp (timestamp)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
     // Create camera_devices table
     await dbConnection.query(`
       CREATE TABLE IF NOT EXISTS camera_devices (
@@ -157,7 +283,7 @@ async function initializeDatabase() {
       ON DUPLICATE KEY UPDATE id=id
     `);
     
-    console.log('✅ Database tables created successfully!');
+    console.log('✅ Database tables initialized successfully!');
     dbConnection.release();
     return true;
   } catch (error) {
