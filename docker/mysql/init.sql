@@ -1541,5 +1541,42 @@ UNLOCK TABLES;
 /*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+--
+-- Table structure for table `company_settings`
+--
+
+DROP TABLE IF EXISTS `company_settings`;
+CREATE TABLE `company_settings` (
+  `id` varchar(64) NOT NULL PRIMARY KEY,
+  `company_name` varchar(255) DEFAULT 'Aparna RMC Ltd.',
+  `firm_name` varchar(255) DEFAULT 'Aparna RMC',
+  `plant_name` varchar(255) DEFAULT 'Plant 1 - Main Batching Yard',
+  `plant_code` varchar(64) DEFAULT 'PLANT_001',
+  `tagline` varchar(255) DEFAULT 'Certified Electronic Weighbridge & Automated Concrete Dispatch',
+  `logo_url` text,
+  `address` text,
+  `city` varchar(100) DEFAULT 'Pune',
+  `state` varchar(100) DEFAULT 'Maharashtra',
+  `pincode` varchar(20) DEFAULT '411057',
+  `phone` varchar(50) DEFAULT '+91 20 2712 8899',
+  `email` varchar(100) DEFAULT 'weighbridge@aparnarmc.com',
+  `website` varchar(255) DEFAULT 'https://www.aparnarmc.com',
+  `gstin` varchar(50) DEFAULT '27AAAAA0000A1Z5',
+  `weighbridge_license` varchar(100) DEFAULT 'WB/2026/RMC-449',
+  `scale_model` varchar(100) DEFAULT 'Avery Weigh-Tronix E1205',
+  `scale_capacity` varchar(50) DEFAULT '100 MT',
+  `scale_division` varchar(50) DEFAULT '10 kg',
+  `currency` varchar(10) DEFAULT '₹',
+  `weighbridge_defaults` json DEFAULT NULL,
+  `invoice_terms` text,
+  `weigh_slip_notes` text,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO `company_settings` (`id`, `company_name`, `firm_name`, `plant_name`, `plant_code`)
+VALUES ('default_company', 'Aparna RMC Ltd.', 'Aparna RMC', 'Plant 1 - Main Batching Yard', 'PLANT_001')
+ON DUPLICATE KEY UPDATE `id`=`id`;
 
 -- Dump completed on 2026-11-11 12:14:11
+

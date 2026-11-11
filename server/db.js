@@ -119,6 +119,43 @@ async function initializeDatabase() {
         FOREIGN KEY (device_id) REFERENCES camera_devices(device_id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
+
+    // Create company_settings table
+    await dbConnection.query(`
+      CREATE TABLE IF NOT EXISTS company_settings (
+        id VARCHAR(64) PRIMARY KEY,
+        company_name VARCHAR(255) DEFAULT 'Aparna RMC Ltd.',
+        firm_name VARCHAR(255) DEFAULT 'Aparna RMC',
+        plant_name VARCHAR(255) DEFAULT 'Plant 1 - Main Batching Yard',
+        plant_code VARCHAR(64) DEFAULT 'PLANT_001',
+        tagline VARCHAR(255) DEFAULT 'Certified Electronic Weighbridge & Automated Concrete Dispatch',
+        logo_url TEXT,
+        address TEXT,
+        city VARCHAR(100) DEFAULT 'Pune',
+        state VARCHAR(100) DEFAULT 'Maharashtra',
+        pincode VARCHAR(20) DEFAULT '411057',
+        phone VARCHAR(50) DEFAULT '+91 20 2712 8899',
+        email VARCHAR(100) DEFAULT 'weighbridge@aparnarmc.com',
+        website VARCHAR(255) DEFAULT 'https://www.aparnarmc.com',
+        gstin VARCHAR(50) DEFAULT '27AAAAA0000A1Z5',
+        weighbridge_license VARCHAR(100) DEFAULT 'WB/2026/RMC-449',
+        scale_model VARCHAR(100) DEFAULT 'Avery Weigh-Tronix E1205',
+        scale_capacity VARCHAR(50) DEFAULT '100 MT',
+        scale_division VARCHAR(50) DEFAULT '10 kg',
+        currency VARCHAR(10) DEFAULT '₹',
+        weighbridge_defaults JSON,
+        invoice_terms TEXT,
+        weigh_slip_notes TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    await dbConnection.query(`
+      INSERT INTO company_settings (id, company_name, firm_name, plant_name, plant_code)
+      VALUES ('default_company', 'Aparna RMC Ltd.', 'Aparna RMC', 'Plant 1 - Main Batching Yard', 'PLANT_001')
+      ON DUPLICATE KEY UPDATE id=id
+    `);
     
     console.log('✅ Database tables created successfully!');
     dbConnection.release();
