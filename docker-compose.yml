@@ -85,7 +85,10 @@ services:
       retries: 5
       start_period: 30s
     networks:
-      - rmc-network
+      rmc-network: {}
+      coolify:
+        aliases:
+          - rmc-database
 
   # ============================================================================
   # 4. PHPMYADMIN SERVICE (Web-based Database Management)
@@ -132,3 +135,5 @@ volumes:
 networks:
   rmc-network:
     driver: bridge
+  coolify:
+    external: true
