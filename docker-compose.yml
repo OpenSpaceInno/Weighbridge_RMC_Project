@@ -10,15 +10,15 @@ services:
       dockerfile: Dockerfile
       args:
         VITE_API_URL: /api
-    container_name: rmc-frontend
     restart: unless-stopped
+    expose:
+      - "80"
     ports:
-      - "${FRONTEND_PORT:-80}:80"
+      - "${FRONTEND_PORT:-8080}:80"
     depends_on:
       - backend
     networks:
       - rmc-network
-    # Labels for Coolify / Traefik SSL & Domain configuration (optional, active when Traefik is present)
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.frontend.rule=Host(`${DOMAIN:-localhost}`)"
@@ -34,10 +34,9 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-    container_name: rmc-backend
     restart: unless-stopped
-    ports:
-      - "${BACKEND_PORT:-3001}:3001"
+    expose:
+      - "3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
@@ -67,7 +66,6 @@ services:
   # ============================================================================
   database:
     image: mysql:8.0
-    container_name: rmc-database
     restart: unless-stopped
     command: >
       --default-authentication-plugin=mysql_native_password
@@ -80,8 +78,8 @@ services:
     volumes:
       - rmc_mysql_data:/var/lib/mysql
       - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-    ports:
-      - "${DB_EXTERNAL_PORT:-3306}:3306"
+    expose:
+      - "3306"
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 10s
@@ -96,7 +94,6 @@ services:
   # ============================================================================
   phpmyadmin:
     image: phpmyadmin:latest
-    container_name: rmc-phpmyadmin
     restart: unless-stopped
     environment:
       PMA_HOST: database
@@ -105,6 +102,8 @@ services:
       UPLOAD_LIMIT: 128M
       MEMORY_LIMIT: 256M
       PMA_ABSOLUTE_URI: ${PMA_ABSOLUTE_URI:-}
+    expose:
+      - "80"
     ports:
       - "${PMA_PORT:-8081}:80"
     depends_on:
