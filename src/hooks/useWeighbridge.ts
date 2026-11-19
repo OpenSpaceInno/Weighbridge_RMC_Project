@@ -304,10 +304,23 @@ export const useWeighbridge = () => {
     }));
   }, [pendingVehicles, loadPendingVehicle]);
 
-  // Manually fetch and apply latest gate vehicle
+  // Manually fetch and apply latest gate vehicle (with active FTP fallback)
   const fetchAndApplyGateVehicle = useCallback(async () => {
     try {
-      const res = await api.getLatestGateVehicle();
+      let res = await api.getLatestGateVehicle().catch(() => null);
+      // If not yet available from standard endpoint, trigger an active FTP sync
+      if (!res || !res.success || !res.vehicleRegNo) {
+        try {
+          const ftpRes = await api.syncFtpNow(true);
+          if (ftpRes?.detection?.vehicleRegNo) {
+            res = {
+              success: true,
+              ...ftpRes.detection
+            };
+          }
+        } catch {}
+      }
+
       if (res && res.success && res.vehicleRegNo) {
         setLatestGateVehicle(res as any);
         applyGateVehicle(res);

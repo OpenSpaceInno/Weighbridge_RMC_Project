@@ -1575,8 +1575,168 @@ CREATE TABLE `company_settings` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO `company_settings` (`id`, `company_name`, `firm_name`, `plant_name`, `plant_code`)
-VALUES ('default_company', 'Aparna RMC Ltd.', 'Aparna RMC', 'Plant 1 - Main Batching Yard', 'PLANT_001')
-ON DUPLICATE KEY UPDATE `id`=`id`;
+VALUES ('default_company', 'Dharani Cotton Mills', 'Dharani Cotton Mills', 'Plant 1 - Main Batching Yard', 'PLANT_001')
+ON DUPLICATE KEY UPDATE `company_name`='Dharani Cotton Mills', `firm_name`='Dharani Cotton Mills';
 
--- Dump completed on 2026-11-11 12:14:11
+--
+-- Table structure for table `anpr_events`
+--
+CREATE TABLE IF NOT EXISTS `anpr_events` (
+  `id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `event_id` varchar(100) NOT NULL UNIQUE,
+  `event_type` varchar(50) DEFAULT 'ANPR_READ',
+  `timestamp` datetime DEFAULT CURRENT_TIMESTAMP,
+  `plant_id` varchar(50) DEFAULT 'plant_001',
+  `camera_id` varchar(50) DEFAULT 'cam_gate_1',
+  `vehicle_reg_no` varchar(50) NOT NULL,
+  `confidence` decimal(5,4) DEFAULT 0.9800,
+  `source` varchar(100) DEFAULT 'ANPR Camera (FTP /Dharani)',
+  `status` varchar(50) DEFAULT 'confirmed',
+  `operator_note` text,
+  `vehicle_type` varchar(50) DEFAULT NULL,
+  `direction` varchar(20) DEFAULT 'entry',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY `idx_anpr_time` (`timestamp`),
+  KEY `idx_anpr_plate` (`vehicle_reg_no`),
+  KEY `idx_anpr_plant` (`plant_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+--
+-- Table structure for table `anpr_evidence`
+--
+CREATE TABLE IF NOT EXISTS `anpr_evidence` (
+  `id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `event_id` varchar(100) NOT NULL,
+  `file_name` varchar(255) NOT NULL,
+  `file_url` text NOT NULL,
+  `file_type` varchar(50) DEFAULT 'image/jpeg',
+  `camera_id` varchar(50) DEFAULT 'cam_gate_1',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  KEY `idx_evidence_event` (`event_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+--
+-- Table structure for table `weighbridge_sessions`
+--
+CREATE TABLE IF NOT EXISTS `weighbridge_sessions` (
+  `id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `session_id` varchar(64) NOT NULL UNIQUE,
+  `transaction_no` int DEFAULT NULL,
+  `vehicle_reg_no` varchar(50) NOT NULL,
+  `party_name` varchar(150) DEFAULT NULL,
+  `firm_name` varchar(150) DEFAULT NULL,
+  `first_weight` decimal(10,2) DEFAULT NULL,
+  `first_weight_time` datetime DEFAULT NULL,
+  `second_weight` decimal(10,2) DEFAULT NULL,
+  `second_weight_time` datetime DEFAULT NULL,
+  `gross_weight` decimal(10,2) DEFAULT NULL,
+  `tare_weight` decimal(10,2) DEFAULT NULL,
+  `net_weight` decimal(10,2) DEFAULT NULL,
+  `material` varchar(150) DEFAULT NULL,
+  `product` varchar(150) DEFAULT NULL,
+  `rate` decimal(10,2) DEFAULT '0.00',
+  `moisture` decimal(10,2) DEFAULT '0.00',
+  `deduction` decimal(10,2) DEFAULT '0.00',
+  `charges` decimal(10,2) DEFAULT '0.00',
+  `less_weight` decimal(10,2) DEFAULT '0.00',
+  `final_weight` decimal(10,2) DEFAULT '0.00',
+  `mois_rate` decimal(10,2) DEFAULT '0.00',
+  `final_rate` decimal(10,2) DEFAULT '0.00',
+  `total_amount` decimal(12,2) DEFAULT '0.00',
+  `vehicle_type` varchar(100) DEFAULT NULL,
+  `bags_bales` varchar(50) DEFAULT NULL,
+  `agent` varchar(100) DEFAULT NULL,
+  `village` varchar(100) DEFAULT NULL,
+  `chess_no` varchar(50) DEFAULT NULL,
+  `chess_amount` decimal(10,2) DEFAULT '0.00',
+  `chess_name` varchar(100) DEFAULT NULL,
+  `location_name` varchar(150) DEFAULT NULL,
+  `cultivator_name` varchar(150) DEFAULT NULL,
+  `load_slip_no` varchar(50) DEFAULT NULL,
+  `father_name` varchar(150) DEFAULT NULL,
+  `mandal` varchar(100) DEFAULT NULL,
+  `bank_name` varchar(150) DEFAULT NULL,
+  `branch_name` varchar(150) DEFAULT NULL,
+  `ifsc_code` varchar(50) DEFAULT NULL,
+  `trader_name` varchar(150) DEFAULT NULL,
+  `alloted_mill` varchar(150) DEFAULT NULL,
+  `account_no` varchar(50) DEFAULT NULL,
+  `heap_no` varchar(50) DEFAULT NULL,
+  `mobile_no` varchar(50) DEFAULT NULL,
+  `image1` text,
+  `image2` text,
+  `image3` text,
+  `image4` text,
+  `udt` datetime DEFAULT NULL,
+  `print_options` json DEFAULT NULL,
+  `status` varchar(50) DEFAULT 'pending_1st_weight',
+  `operator_id` varchar(50) DEFAULT NULL,
+  `operator_name` varchar(100) DEFAULT NULL,
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY `idx_session_tx` (`transaction_no`),
+  KEY `idx_session_veh` (`vehicle_reg_no`),
+  KEY `idx_session_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+--
+-- Table structure for table `weigh_slips`
+--
+CREATE TABLE IF NOT EXISTS `weigh_slips` (
+  `id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `slip_number` varchar(64) DEFAULT NULL,
+  `session_id` varchar(64) DEFAULT NULL,
+  `transaction_no` int NOT NULL,
+  `vehicle_reg_no` varchar(50) DEFAULT '',
+  `vehicle_no` varchar(50) NOT NULL,
+  `party_name` varchar(255) DEFAULT '',
+  `firm_name` varchar(255) DEFAULT '',
+  `first_weight` decimal(10,2) DEFAULT NULL,
+  `first_weight_date` date DEFAULT NULL,
+  `first_weight_time` datetime DEFAULT NULL,
+  `second_weight` decimal(10,2) DEFAULT NULL,
+  `second_weight_date` date DEFAULT NULL,
+  `second_weight_time` datetime DEFAULT NULL,
+  `tare_weight` decimal(10,2) DEFAULT NULL,
+  `gross_weight` decimal(10,2) DEFAULT NULL,
+  `net_weight` decimal(10,2) DEFAULT NULL,
+  `nett_weight` decimal(10,2) DEFAULT NULL,
+  `rate` decimal(10,2) DEFAULT '0.00',
+  `moisture` decimal(5,2) DEFAULT '0.00',
+  `deduction` decimal(10,2) DEFAULT '0.00',
+  `charges` decimal(10,2) DEFAULT '0.00',
+  `vehicle_type` varchar(100) DEFAULT '',
+  `bags_bales` varchar(100) DEFAULT '',
+  `agent` varchar(100) DEFAULT '',
+  `village` varchar(100) DEFAULT '',
+  `chess_no` varchar(50) DEFAULT '',
+  `chess_amount` decimal(10,2) DEFAULT '0.00',
+  `chess_name` varchar(100) DEFAULT '',
+  `final_rate` decimal(10,2) DEFAULT '0.00',
+  `total_amount` decimal(12,2) DEFAULT '0.00',
+  `print_options` json DEFAULT NULL,
+  `company_name` varchar(255) DEFAULT '',
+  `company_address` text,
+  `phone_no` varchar(50) DEFAULT '',
+  `load_slip_no` varchar(100) DEFAULT '',
+  `cultivator_name` varchar(150) DEFAULT '',
+  `father_name` varchar(150) DEFAULT '',
+  `location_name` varchar(150) DEFAULT '',
+  `mobile_no` varchar(50) DEFAULT '',
+  `material` varchar(150) DEFAULT '',
+  `product` varchar(150) DEFAULT '',
+  `destination` varchar(150) DEFAULT '',
+  `driver_name` varchar(150) DEFAULT '',
+  `operator_name` varchar(100) DEFAULT '',
+  `evidence` json DEFAULT NULL,
+  `admin_name` varchar(100) DEFAULT '',
+  `status` varchar(50) DEFAULT 'completed',
+  `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY `idx_slip_tx` (`transaction_no`),
+  KEY `idx_slip_veh` (`vehicle_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Dump completed on 2026-11-19 16:30:00
 

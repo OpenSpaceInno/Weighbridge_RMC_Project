@@ -649,7 +649,20 @@ let gateVehicleClearedAt = 0;
 app.get('/api/gate/latest-vehicle', async (req, res) => {
   try {
     // 1. Check active real-time detection from FTP Watcher
-    const ftpLatest = ftpAnprWatcher.getLatestDetection();
+    let ftpLatest = ftpAnprWatcher.getLatestDetection();
+
+    // If not in memory yet, do an active sync directly from FTP
+    if (!ftpLatest || !ftpLatest.vehicleRegNo) {
+      try {
+        const synced = await ftpAnprWatcher.syncLatestExisting();
+        if (synced && synced.vehicleRegNo) {
+          ftpLatest = synced;
+        }
+      } catch (ftpErr) {
+        console.warn('[FTP ANPR] On-demand sync warning:', ftpErr.message);
+      }
+    }
+
     if (ftpLatest && ftpLatest.vehicleRegNo) {
       return res.json(ftpLatest);
     }
@@ -667,60 +680,65 @@ app.get('/api/gate/latest-vehicle', async (req, res) => {
       return res.json({ success: false, message: 'No vehicle currently at gate' });
     }
 
-    // 3. Query only recent detections from anpr_events (within last 30 minutes)
-    const [rows] = await pool.query(`
-      SELECT 
-        e.*,
-        v.id AS vehicle_id,
-        v.make AS vehicle_make,
-        v.model AS vehicle_model,
-        v.current_driver AS vehicle_driver,
-        v.current_driver_phone AS vehicle_driver_phone,
-        v.status AS vehicle_status
-      FROM anpr_events e
-      LEFT JOIN vehicles v ON (
-        REPLACE(UPPER(e.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', '')
-      )
-      WHERE e.vehicle_reg_no NOT IN ('KA05AB1234', 'MH02CD5678', 'DL01EF9012', 'TN09GH3456', 'GJ06IJ7890')
-        AND e.timestamp >= NOW() - INTERVAL 30 MINUTE
-      ORDER BY e.timestamp DESC
-      LIMIT 1
-    `);
-
-    if (rows.length > 0) {
-      const row = rows[0];
-      const [tripRows] = await pool.query(`
-        SELECT customer_name, material, driver_name 
-        FROM trips 
-        WHERE REPLACE(UPPER(vehicle_reg_no), ' ', '') = REPLACE(UPPER(?), ' ', '')
-        ORDER BY created_at DESC 
+    // 3. Fallback: Query recent detections from anpr_events
+    try {
+      const [rows] = await pool.query(`
+        SELECT 
+          e.*,
+          v.id AS vehicle_id,
+          v.make AS vehicle_make,
+          v.model AS vehicle_model,
+          v.current_driver AS vehicle_driver,
+          v.current_driver_phone AS vehicle_driver_phone,
+          v.status AS vehicle_status
+        FROM anpr_events e
+        LEFT JOIN vehicles v ON (
+          REPLACE(UPPER(e.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', '')
+        )
+        WHERE e.vehicle_reg_no NOT IN ('KA05AB1234', 'MH02CD5678', 'DL01EF9012', 'TN09GH3456', 'GJ06IJ7890')
+        ORDER BY e.id DESC
         LIMIT 1
-      `, [row.vehicle_reg_no]);
+      `);
 
-      const trip = tripRows.length > 0 ? tripRows[0] : null;
+      if (rows && rows.length > 0) {
+        const row = rows[0];
+        let trip = null;
+        try {
+          const [tripRows] = await pool.query(`
+            SELECT customer_name, material, driver_name 
+            FROM trips 
+            WHERE REPLACE(UPPER(vehicle_reg_no), ' ', '') = REPLACE(UPPER(?), ' ', '')
+            ORDER BY created_at DESC 
+            LIMIT 1
+          `, [row.vehicle_reg_no]);
+          trip = tripRows.length > 0 ? tripRows[0] : null;
+        } catch (tripErr) {}
 
-      return res.json({
-        success: true,
-        vehicleRegNo: row.vehicle_reg_no,
-        confidence: parseFloat(row.confidence || 0.98),
-        source: row.source || 'Entry Gate ANPR Camera (FTP)',
-        timestamp: row.timestamp,
-        cameraId: row.camera_id,
-        matchedVehicle: {
-          make: row.vehicle_make,
-          model: row.vehicle_model,
-          driverName: row.vehicle_driver || trip?.driver_name,
-          partyName: trip?.customer_name,
-          product: trip?.material
-        }
-      });
+        return res.json({
+          success: true,
+          vehicleRegNo: row.vehicle_reg_no,
+          confidence: parseFloat(row.confidence || 0.98),
+          source: row.source || 'Entry Gate ANPR Camera (FTP)',
+          timestamp: row.timestamp,
+          cameraId: row.camera_id,
+          matchedVehicle: {
+            make: row.vehicle_make,
+            model: row.vehicle_model,
+            driverName: row.vehicle_driver || trip?.driver_name,
+            partyName: trip?.customer_name,
+            product: trip?.material
+          }
+        });
+      }
+    } catch (dbErr) {
+      console.warn('[Gate] anpr_events DB query warning:', dbErr.message);
     }
 
-    // If no vehicle is at the gate, report clean state (strictly no mock or stale session fallback)
+    // If no vehicle is at the gate, report clean state
     res.json({ success: false, message: 'No vehicle currently at gate' });
   } catch (error) {
     console.error('Get latest gate vehicle error:', error);
-    res.status(500).json({ error: error.message });
+    res.json({ success: false, message: 'No vehicle currently at gate' });
   }
 });
 

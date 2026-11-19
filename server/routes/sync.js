@@ -53,6 +53,185 @@ router.post('/trigger', async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/sync/init-tables
+// Idempotently creates missing operational tables (anpr_events, weigh_slips, etc.)
+// ============================================================================
+router.post('/init-tables', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS anpr_events (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          event_id VARCHAR(100) NOT NULL UNIQUE,
+          event_type VARCHAR(50) DEFAULT 'ANPR_READ',
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+          plant_id VARCHAR(50) DEFAULT 'plant_001',
+          camera_id VARCHAR(50) DEFAULT 'cam_gate_1',
+          vehicle_reg_no VARCHAR(50) NOT NULL,
+          confidence DECIMAL(5,4) DEFAULT 0.9800,
+          source VARCHAR(100) DEFAULT 'ANPR Camera (FTP /Dharani)',
+          status VARCHAR(50) DEFAULT 'confirmed',
+          operator_note TEXT NULL,
+          vehicle_type VARCHAR(50) NULL,
+          direction VARCHAR(20) DEFAULT 'entry',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_anpr_time (timestamp),
+          INDEX idx_anpr_plate (vehicle_reg_no),
+          INDEX idx_anpr_plant (plant_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS anpr_evidence (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          event_id VARCHAR(100) NOT NULL,
+          file_name VARCHAR(255) NOT NULL,
+          file_url TEXT NOT NULL,
+          file_type VARCHAR(50) DEFAULT 'image/jpeg',
+          camera_id VARCHAR(50) DEFAULT 'cam_gate_1',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_evidence_event (event_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS weighbridge_sessions (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          session_id VARCHAR(64) NOT NULL UNIQUE,
+          transaction_no INT NULL,
+          vehicle_reg_no VARCHAR(50) NOT NULL,
+          party_name VARCHAR(150) NULL,
+          firm_name VARCHAR(150) NULL,
+          first_weight DECIMAL(10,2) NULL,
+          first_weight_time DATETIME NULL,
+          second_weight DECIMAL(10,2) NULL,
+          second_weight_time DATETIME NULL,
+          gross_weight DECIMAL(10,2) NULL,
+          tare_weight DECIMAL(10,2) NULL,
+          net_weight DECIMAL(10,2) NULL,
+          material VARCHAR(150) NULL,
+          product VARCHAR(150) NULL,
+          rate DECIMAL(10,2) DEFAULT 0.00,
+          moisture DECIMAL(10,2) DEFAULT 0.00,
+          deduction DECIMAL(10,2) DEFAULT 0.00,
+          charges DECIMAL(10,2) DEFAULT 0.00,
+          less_weight DECIMAL(10,2) DEFAULT 0.00,
+          final_weight DECIMAL(10,2) DEFAULT 0.00,
+          mois_rate DECIMAL(10,2) DEFAULT 0.00,
+          final_rate DECIMAL(10,2) DEFAULT 0.00,
+          total_amount DECIMAL(12,2) DEFAULT 0.00,
+          vehicle_type VARCHAR(100) NULL,
+          bags_bales VARCHAR(50) NULL,
+          agent VARCHAR(100) NULL,
+          village VARCHAR(100) NULL,
+          chess_no VARCHAR(50) NULL,
+          chess_amount DECIMAL(10,2) DEFAULT 0.00,
+          chess_name VARCHAR(100) NULL,
+          location_name VARCHAR(150) NULL,
+          cultivator_name VARCHAR(150) NULL,
+          load_slip_no VARCHAR(50) NULL,
+          father_name VARCHAR(150) NULL,
+          mandal VARCHAR(100) NULL,
+          bank_name VARCHAR(150) NULL,
+          branch_name VARCHAR(150) NULL,
+          ifsc_code VARCHAR(50) NULL,
+          trader_name VARCHAR(150) NULL,
+          alloted_mill VARCHAR(150) NULL,
+          account_no VARCHAR(50) NULL,
+          heap_no VARCHAR(50) NULL,
+          mobile_no VARCHAR(50) NULL,
+          image1 TEXT NULL,
+          image2 TEXT NULL,
+          image3 TEXT NULL,
+          image4 TEXT NULL,
+          udt DATETIME NULL,
+          print_options JSON NULL,
+          status VARCHAR(50) DEFAULT 'pending_1st_weight',
+          operator_id VARCHAR(50) NULL,
+          operator_name VARCHAR(100) NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_session_tx (transaction_no),
+          INDEX idx_session_veh (vehicle_reg_no),
+          INDEX idx_session_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await connection.query(`
+        CREATE TABLE IF NOT EXISTS weigh_slips (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          slip_number VARCHAR(64) DEFAULT NULL,
+          session_id VARCHAR(64) DEFAULT NULL,
+          transaction_no INT NOT NULL,
+          vehicle_reg_no VARCHAR(50) DEFAULT '',
+          vehicle_no VARCHAR(50) NOT NULL,
+          party_name VARCHAR(255) DEFAULT '',
+          firm_name VARCHAR(255) DEFAULT '',
+          first_weight DECIMAL(10,2) DEFAULT NULL,
+          first_weight_date DATE DEFAULT NULL,
+          first_weight_time DATETIME DEFAULT NULL,
+          second_weight DECIMAL(10,2) DEFAULT NULL,
+          second_weight_date DATE DEFAULT NULL,
+          second_weight_time DATETIME DEFAULT NULL,
+          tare_weight DECIMAL(10,2) DEFAULT NULL,
+          gross_weight DECIMAL(10,2) DEFAULT NULL,
+          net_weight DECIMAL(10,2) DEFAULT NULL,
+          nett_weight DECIMAL(10,2) DEFAULT NULL,
+          rate DECIMAL(10,2) DEFAULT 0,
+          moisture DECIMAL(5,2) DEFAULT 0,
+          deduction DECIMAL(10,2) DEFAULT 0,
+          charges DECIMAL(10,2) DEFAULT 0,
+          vehicle_type VARCHAR(100) DEFAULT '',
+          bags_bales VARCHAR(100) DEFAULT '',
+          agent VARCHAR(100) DEFAULT '',
+          village VARCHAR(100) DEFAULT '',
+          chess_no VARCHAR(50) DEFAULT '',
+          chess_amount DECIMAL(10,2) DEFAULT 0,
+          chess_name VARCHAR(100) DEFAULT '',
+          final_rate DECIMAL(10,2) DEFAULT 0,
+          total_amount DECIMAL(12,2) DEFAULT 0,
+          print_options JSON DEFAULT NULL,
+          company_name VARCHAR(255) DEFAULT '',
+          company_address TEXT DEFAULT NULL,
+          phone_no VARCHAR(50) DEFAULT '',
+          load_slip_no VARCHAR(100) DEFAULT '',
+          cultivator_name VARCHAR(150) DEFAULT '',
+          father_name VARCHAR(150) DEFAULT '',
+          location_name VARCHAR(150) DEFAULT '',
+          mobile_no VARCHAR(50) DEFAULT '',
+          material VARCHAR(150) DEFAULT '',
+          product VARCHAR(150) DEFAULT '',
+          destination VARCHAR(150) DEFAULT '',
+          driver_name VARCHAR(150) DEFAULT '',
+          operator_name VARCHAR(100) DEFAULT '',
+          evidence JSON DEFAULT NULL,
+          admin_name VARCHAR(100) DEFAULT '',
+          status VARCHAR(50) DEFAULT 'completed',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          INDEX idx_slip_tx (transaction_no),
+          INDEX idx_slip_veh (vehicle_no)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      await connection.query(`
+        INSERT INTO company_settings (id, company_name, firm_name, plant_name, plant_code)
+        VALUES ('default_company', 'Dharani Cotton Mills', 'Dharani Cotton Mills', 'Plant 1 - Main Batching Yard', 'PLANT_001')
+        ON DUPLICATE KEY UPDATE company_name='Dharani Cotton Mills', firm_name='Dharani Cotton Mills'
+      `);
+
+      res.json({ success: true, message: 'All operational tables initialized successfully!' });
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================================
 // POST /api/sync/push
 // Central Server Receiver: Upserts incoming data batches
 // Uses transactions, disables FK checks during batch, and tracks inserted vs updated

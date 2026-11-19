@@ -308,6 +308,11 @@ class FtpAnprWatcher {
         detectedFiles.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
         if (isBaseline) {
+          if (detectedFiles.length > 0 && !this.latestDetection) {
+            const newest = detectedFiles[0];
+            console.log(`📸 [FTP ANPR] Baseline initialized from Camera FTP with plate: ${newest.plate} (${newest.fileName})`);
+            await this.recordDetectionToDb(newest);
+          }
           for (const f of detectedFiles) {
             this.processedFiles.add(f.fileName);
           }
@@ -386,6 +391,11 @@ class FtpAnprWatcher {
       detectedFiles.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 
       if (isBaseline) {
+        if (detectedFiles.length > 0) {
+          const newest = detectedFiles[0];
+          console.log(`📸 [FTP ANPR] Baseline initialized from /Dharani with latest plate: ${newest.plate} (${newest.fileName})`);
+          await this.recordDetectionToDb(newest);
+        }
         for (const f of detectedFiles) {
           this.processedFiles.add(f.fileName);
         }
@@ -411,55 +421,106 @@ class FtpAnprWatcher {
    */
   async recordDetectionToDb(fileData) {
     const { plate, timestamp, fileName } = fileData;
-    const cleanPlate = plate.replace(/\s+/g, '').toUpperCase();
+    const cleanPlate = (plate || '').replace(/\s+/g, '').toUpperCase();
     const event_id = `evt_FTP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
 
+    // Build detection object and store in memory immediately so it is 100% accessible
+    const detection = {
+      success: true,
+      vehicleRegNo: cleanPlate,
+      confidence: 0.98,
+      source: 'Entry Gate ANPR Camera (FTP)',
+      timestamp: timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
+      cameraId: 'cam_gate_1',
+      fileName,
+      direction: 'entry',
+      matchedVehicle: {
+        make: '',
+        model: '',
+        driverName: '',
+        driverPhone: '',
+        partyName: '',
+        product: '',
+      }
+    };
+
+    this.latestDetection = detection;
+    this.notifyListeners(detection);
+
+    // Try to record into MySQL and enrich with vehicle master match
     try {
-      // 1. Insert into anpr_events
-      await pool.query(
-        `INSERT INTO anpr_events 
-         (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction, timestamp)
-         VALUES (?, 'plant_001', 'cam_gate_1', ?, 0.98, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry', ?)`,
-        [event_id, cleanPlate, timestamp || new Date()]
-      );
-
-      // 2. Query vehicles and trips for auto-match
-      const [vehRows] = await pool.query(
-        `SELECT v.make, v.model, v.current_driver, v.current_driver_phone, t.customer_name, t.material 
-         FROM vehicles v
-         LEFT JOIN trips t ON (REPLACE(UPPER(t.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', ''))
-         WHERE REPLACE(UPPER(v.registration_no), ' ', '') = ?
-         LIMIT 1`,
-        [cleanPlate]
-      );
-
-      const matched = vehRows.length > 0 ? vehRows[0] : null;
-
-      const detection = {
-        success: true,
-        vehicleRegNo: cleanPlate,
-        confidence: 0.98,
-        source: 'ANPR Camera (FTP /Dharani)',
-        timestamp: timestamp || new Date().toISOString(),
-        cameraId: 'cam_gate_1',
-        fileName,
-        matchedVehicle: {
-          make: matched?.make || '',
-          model: matched?.model || '',
-          driverName: matched?.current_driver || '',
-          driverPhone: matched?.current_driver_phone || '',
-          partyName: matched?.customer_name || '',
-          product: matched?.material || '',
+      try {
+        await pool.query(
+          `INSERT INTO anpr_events 
+           (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction, timestamp)
+           VALUES (?, 'plant_001', 'cam_gate_1', ?, 0.98, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry', ?)`,
+          [event_id, cleanPlate, timestamp || new Date()]
+        );
+      } catch (insertErr) {
+        if (insertErr.code === 'ER_NO_SUCH_TABLE' || (insertErr.message && insertErr.message.includes("doesn't exist"))) {
+          console.log('[FTP ANPR] anpr_events table missing, auto-creating table...');
+          await pool.query(`
+            CREATE TABLE IF NOT EXISTS anpr_events (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              event_id VARCHAR(100) NOT NULL UNIQUE,
+              event_type VARCHAR(50) DEFAULT 'ANPR_READ',
+              timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+              plant_id VARCHAR(50) DEFAULT 'plant_001',
+              camera_id VARCHAR(50) DEFAULT 'cam_gate_1',
+              vehicle_reg_no VARCHAR(50) NOT NULL,
+              confidence DECIMAL(5,4) DEFAULT 0.9800,
+              source VARCHAR(100) DEFAULT 'ANPR Camera (FTP /Dharani)',
+              status VARCHAR(50) DEFAULT 'confirmed',
+              operator_note TEXT NULL,
+              vehicle_type VARCHAR(50) NULL,
+              direction VARCHAR(20) DEFAULT 'entry',
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_anpr_time (timestamp),
+              INDEX idx_anpr_plate (vehicle_reg_no),
+              INDEX idx_anpr_plant (plant_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          `);
+          await pool.query(
+            `INSERT INTO anpr_events 
+             (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction, timestamp)
+             VALUES (?, 'plant_001', 'cam_gate_1', ?, 0.98, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry', ?)`,
+            [event_id, cleanPlate, timestamp || new Date()]
+          );
+        } else {
+          console.warn('[FTP ANPR] DB insert warning:', insertErr.message);
         }
-      };
+      }
 
-      this.latestDetection = detection;
-      this.notifyListeners(detection);
+      // Query vehicles and trips for auto-match if tables exist
+      try {
+        const [vehRows] = await pool.query(
+          `SELECT v.make, v.model, v.current_driver, v.current_driver_phone, t.customer_name, t.material 
+           FROM vehicles v
+           LEFT JOIN trips t ON (REPLACE(UPPER(t.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', ''))
+           WHERE REPLACE(UPPER(v.registration_no), ' ', '') = ?
+           LIMIT 1`,
+          [cleanPlate]
+        );
+
+        if (vehRows && vehRows.length > 0) {
+          const matched = vehRows[0];
+          detection.matchedVehicle = {
+            make: matched?.make || '',
+            model: matched?.model || '',
+            driverName: matched?.current_driver || '',
+            driverPhone: matched?.current_driver_phone || '',
+            partyName: matched?.customer_name || '',
+            product: matched?.material || '',
+          };
+          this.latestDetection = detection;
+        }
+      } catch (vehErr) {}
 
       return detection;
     } catch (err) {
-      console.error('[FTP ANPR] Error saving detection to DB:', err.message);
-      return null;
+      console.warn('[FTP ANPR] DB enrichment warning (cached plate preserved):', err.message);
+      return detection;
     }
   }
 
