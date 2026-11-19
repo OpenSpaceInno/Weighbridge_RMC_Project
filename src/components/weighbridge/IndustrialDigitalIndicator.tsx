@@ -41,12 +41,15 @@ export const IndustrialDigitalIndicator: React.FC<IndustrialDigitalIndicatorProp
       </div>
 
       {/* 5-Digit 7-Segment Digital Scale Display e.g. 00000 */}
-      <div className="flex items-baseline gap-1 font-mono">
+      <div className="flex items-baseline gap-1.5 font-mono">
         <div className="text-2xl sm:text-3xl font-black tracking-widest text-cyan-400 drop-shadow-[0_0_10px_rgba(34,211,238,0.5)]">
           {formattedDigits}
         </div>
-        <div className="text-[10px] font-bold text-cyan-500 tracking-wider">
-          {(reading.unit || 'kg').toUpperCase()}
+        <div className="flex flex-col text-[9px] font-bold text-cyan-500 tracking-wider leading-tight">
+          <span>{(reading.unit || 'kg').toUpperCase()}</span>
+          <span className="text-yellow-400 font-bold font-mono">
+            {(reading.weightQtl !== undefined ? reading.weightQtl : (reading.weight || 0) / 100).toFixed(2)} Qtl
+          </span>
         </div>
       </div>
 

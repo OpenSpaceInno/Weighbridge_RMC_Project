@@ -4,10 +4,11 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '.env') });
+dotenv.config();
 
 // Create connection pool (without database selection initially)
 const poolWithoutDb = mysql.createPool({
@@ -282,6 +283,97 @@ async function initializeDatabase() {
       VALUES ('default_company', 'Aparna RMC Ltd.', 'Aparna RMC', 'Plant 1 - Main Batching Yard', 'PLANT_001')
       ON DUPLICATE KEY UPDATE id=id
     `);
+
+    // Ensure all weigh_slips columns exist
+    const [existingSlipCols] = await dbConnection.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'weigh_slips'
+    `, [dbName]);
+    const slipColSet = new Set(existingSlipCols.map(c => c.COLUMN_NAME.toLowerCase()));
+
+    const requiredSlipCols = [
+      { name: 'transaction_no', type: 'INT DEFAULT 0' },
+      { name: 'party_name', type: "VARCHAR(255) DEFAULT ''" },
+      { name: 'firm_name', type: "VARCHAR(255) DEFAULT ''" },
+      { name: 'first_weight', type: 'DECIMAL(10,2) DEFAULT NULL' },
+      { name: 'first_weight_time', type: 'DATETIME DEFAULT NULL' },
+      { name: 'second_weight', type: 'DECIMAL(10,2) DEFAULT NULL' },
+      { name: 'second_weight_time', type: 'DATETIME DEFAULT NULL' },
+      { name: 'rate', type: 'DECIMAL(10,2) DEFAULT 0' },
+      { name: 'moisture', type: 'DECIMAL(5,2) DEFAULT 0' },
+      { name: 'deduction', type: 'DECIMAL(10,2) DEFAULT 0' },
+      { name: 'charges', type: 'DECIMAL(10,2) DEFAULT 0' },
+      { name: 'vehicle_type', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'bags_bales', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'agent', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'village', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'chess_no', type: "VARCHAR(50) DEFAULT ''" },
+      { name: 'chess_amount', type: 'DECIMAL(10,2) DEFAULT 0' },
+      { name: 'chess_name', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'final_rate', type: 'DECIMAL(10,2) DEFAULT 0' },
+      { name: 'total_amount', type: 'DECIMAL(12,2) DEFAULT 0' },
+      { name: 'print_options', type: 'JSON DEFAULT NULL' },
+      { name: 'company_name', type: "VARCHAR(255) DEFAULT ''" },
+      { name: 'company_address', type: "TEXT DEFAULT NULL" },
+      { name: 'phone_no', type: "VARCHAR(50) DEFAULT ''" },
+      { name: 'load_slip_no', type: "VARCHAR(100) DEFAULT ''" },
+      { name: 'vehicle_no', type: "VARCHAR(50) DEFAULT ''" },
+      { name: 'cultivator_name', type: "VARCHAR(150) DEFAULT ''" },
+      { name: 'father_name', type: "VARCHAR(150) DEFAULT ''" },
+      { name: 'mobile_no', type: "VARCHAR(50) DEFAULT ''" },
+      { name: 'status', type: "VARCHAR(50) DEFAULT 'completed'" },
+      { name: 'first_weight_date', type: "DATE DEFAULT NULL" },
+      { name: 'second_weight_date', type: "DATE DEFAULT NULL" },
+      { name: 'nett_weight', type: "DECIMAL(10,2) DEFAULT NULL" },
+      { name: 'admin_name', type: "VARCHAR(100) DEFAULT ''" }
+    ];
+
+    for (const col of requiredSlipCols) {
+      if (!slipColSet.has(col.name.toLowerCase())) {
+        try {
+          await dbConnection.query(`ALTER TABLE weigh_slips ADD COLUMN \`${col.name}\` ${col.type}`);
+        } catch (e) {}
+      }
+    }
+
+    // Auto-synchronize any existing weighbridge_sessions into weigh_slips
+    try {
+      await dbConnection.query(`
+        INSERT INTO weigh_slips (
+          slip_number, session_id, transaction_no, vehicle_reg_no, party_name, firm_name,
+          date_time, first_weight, first_weight_time, second_weight, second_weight_time,
+          tare_weight, gross_weight, net_weight, material, rate, moisture, deduction,
+          charges, vehicle_type, bags_bales, agent, village, chess_no, chess_amount,
+          chess_name, final_rate, total_amount, print_options, driver_name, destination,
+          operator_name, evidence, load_slip_no, vehicle_no, cultivator_name, location_name,
+          father_name, mobile_no, status, first_weight_date, second_weight_date, nett_weight,
+          admin_name, product, created_at
+        )
+        SELECT
+          CONCAT('WS-2026-', LPAD(ws.transaction_no, 4, '0')),
+          ws.session_id, ws.transaction_no, ws.vehicle_reg_no, ws.party_name, ws.firm_name,
+          COALESCE(ws.timestamp, NOW()), ws.first_weight, ws.first_weight_time, ws.second_weight, ws.second_weight_time,
+          ws.tare_weight, ws.gross_weight, ws.net_weight, ws.material, ws.rate, ws.moisture, ws.deduction,
+          ws.charges, ws.vehicle_type, ws.bags_bales, ws.agent, ws.village, ws.chess_no, ws.chess_amount,
+          ws.chess_name, ws.final_rate, ws.total_amount, ws.print_options, ws.driver_name, ws.destination,
+          ws.operator_name, ws.evidence, ws.load_slip_no, ws.vehicle_reg_no, ws.cultivator_name, ws.location_name,
+          ws.father_name, ws.mobile_no, ws.status,
+          DATE(ws.first_weight_time), DATE(ws.second_weight_time), ws.net_weight,
+          ws.operator_name, ws.material, ws.created_at
+        FROM weighbridge_sessions ws
+        WHERE ws.transaction_no IS NOT NULL
+        ON DUPLICATE KEY UPDATE
+          first_weight = VALUES(first_weight),
+          second_weight = VALUES(second_weight),
+          net_weight = VALUES(net_weight),
+          nett_weight = VALUES(nett_weight),
+          total_amount = VALUES(total_amount),
+          status = VALUES(status)
+      `);
+    } catch (syncErr) {
+      console.warn('Auto-backfill weigh_slips warning:', syncErr.message);
+    }
     
     console.log('✅ Database tables initialized successfully!');
     dbConnection.release();

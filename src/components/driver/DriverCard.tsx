@@ -40,10 +40,33 @@ const licenseStatusConfig = {
   suspended: { label: 'Suspended', className: 'bg-red-500/10 text-red-600' },
 };
 
+const safeFormatDate = (dateVal: any, fmt: string, fallback = '—') => {
+  if (!dateVal) return fallback;
+  try {
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return fallback;
+    return format(d, fmt);
+  } catch (e) {
+    return fallback;
+  }
+};
+
 export function DriverCard({ driver, onView, onEdit, onDelete, onAssignVehicle }: DriverCardProps) {
-  const statusInfo = statusConfig[driver.status];
-  const licenseStatusInfo = licenseStatusConfig[driver.license.status];
-  const daysUntilExpiry = differenceInDays(new Date(driver.license.expiryDate), new Date());
+  const statusInfo = statusConfig[driver.status] || statusConfig.available;
+  const licenseStatus = driver.license?.status || 'valid';
+  const licenseStatusInfo = licenseStatusConfig[licenseStatus] || licenseStatusConfig.valid;
+
+  let daysUntilExpiry = 999;
+  if (driver.license?.expiryDate) {
+    try {
+      const expD = new Date(driver.license.expiryDate);
+      if (!isNaN(expD.getTime())) {
+        daysUntilExpiry = differenceInDays(expD, new Date());
+      }
+    } catch (e) {}
+  }
+
+  const isExpiringSoon = licenseStatus === 'expiring_soon' || (daysUntilExpiry <= 30 && daysUntilExpiry >= 0);
 
   return (
     <Card className="hover:shadow-md transition-shadow">
@@ -54,8 +77,8 @@ export function DriverCard({ driver, onView, onEdit, onDelete, onAssignVehicle }
               <User className="h-6 w-6 text-primary" />
             </div>
             <div>
-              <h3 className="font-semibold text-foreground">{driver.name}</h3>
-              <p className="text-sm text-muted-foreground">{driver.employeeId}</p>
+              <h3 className="font-semibold text-foreground">{driver.name || 'Unnamed Driver'}</h3>
+              <p className="text-sm text-muted-foreground">{driver.employeeId || 'ID Pending'}</p>
             </div>
           </div>
           <Badge className={statusInfo.className}>
@@ -66,7 +89,7 @@ export function DriverCard({ driver, onView, onEdit, onDelete, onAssignVehicle }
         <div className="space-y-3 mb-4">
           <div className="flex items-center gap-2 text-sm">
             <Phone className="h-4 w-4 text-muted-foreground" />
-            <span className="text-foreground">{driver.phone}</span>
+            <span className="text-foreground">{driver.phone || 'No phone'}</span>
           </div>
           
           {driver.assignedVehicle && (
@@ -78,13 +101,13 @@ export function DriverCard({ driver, onView, onEdit, onDelete, onAssignVehicle }
           
           <div className="flex items-center gap-2 text-sm">
             <Star className="h-4 w-4 text-amber-500" />
-            <span className="text-foreground">{driver.rating.toFixed(1)}</span>
-            <span className="text-muted-foreground">• {driver.totalTrips} trips</span>
+            <span className="text-foreground">{(driver.rating || 5).toFixed(1)}</span>
+            <span className="text-muted-foreground">• {driver.totalTrips || 0} trips</span>
           </div>
 
           <div className="flex items-center gap-2 text-sm">
             <MapPin className="h-4 w-4 text-muted-foreground" />
-            <span className="text-muted-foreground">{(driver.totalDistance / 1000).toFixed(1)}k km covered</span>
+            <span className="text-muted-foreground">{((driver.totalDistance || 0) / 1000).toFixed(1)}k km covered</span>
           </div>
         </div>
 
@@ -93,20 +116,20 @@ export function DriverCard({ driver, onView, onEdit, onDelete, onAssignVehicle }
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-medium text-muted-foreground">License</span>
             <Badge variant="outline" className={licenseStatusInfo.className}>
-              {licenseStatusInfo.label}
+              {isExpiringSoon ? 'Expiring Soon' : licenseStatusInfo.label}
             </Badge>
           </div>
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-foreground">{driver.license.type}</span>
+            <span className="text-sm font-medium text-foreground">{driver.license?.type || 'HMV'}</span>
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <Calendar className="h-3 w-3" />
-              <span>Exp: {format(new Date(driver.license.expiryDate), 'MMM yyyy')}</span>
+              <span>Exp: {safeFormatDate(driver.license?.expiryDate, 'MMM yyyy')}</span>
             </div>
           </div>
-          {driver.license.status === 'expiring_soon' && (
+          {isExpiringSoon && (
             <div className="flex items-center gap-1 mt-2 text-xs text-amber-600">
               <AlertTriangle className="h-3 w-3" />
-              <span>Expires in {daysUntilExpiry} days</span>
+              <span>Expires in {daysUntilExpiry > 0 ? `${daysUntilExpiry} days` : 'today'}</span>
             </div>
           )}
         </div>

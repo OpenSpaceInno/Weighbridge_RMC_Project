@@ -2,8 +2,13 @@ export interface WeightReading {
   timestamp: string;
   weight: number;
   unit: 'kg' | 'ton';
+  weightQtl?: number;
   stable: boolean;
   zero?: boolean;
+  source?: string;
+  deviceCode?: string;
+  connected?: boolean;
+  serialPort?: string;
 }
 
 export interface Evidence {
@@ -26,22 +31,33 @@ export interface WeighbridgeSession {
   sessionId: string;
   transactionNo: number;
   vehicleRegNo: string;
+  vehicleNo?: string;
   partyName?: string;
   firmName?: string;
+  companyName?: string;
+  companyAddress?: string;
+  phoneNo?: string;
+  loadSlipNo?: string;
+  cultivatorName?: string;
+  fatherName?: string;
+  mobileNo?: string;
   product?: string;
   material?: string;
   timestamp: string;
   
   // Dual-weighment
   firstWeight: number | null;
+  firstWeightDate?: string | null;
   firstWeightTime?: string | null;
   secondWeight: number | null;
+  secondWeightDate?: string | null;
   secondWeightTime?: string | null;
   
   // Legacy compatibility
   tareWeight: number | null;
   grossWeight: number | null;
   netWeight: number | null;
+  nettWeight?: number | null;
   
   // Commercial parameters
   rate?: number;
@@ -52,6 +68,7 @@ export interface WeighbridgeSession {
   bagsBales?: string;
   agent?: string;
   village?: string;
+  locationName?: string;
   chessNo?: string;
   chessAmount?: number;
   chessName?: string;
@@ -62,50 +79,65 @@ export interface WeighbridgeSession {
   driverName?: string;
   destination?: string;
   evidence: Evidence[];
-  status: 'tare' | 'gross' | 'completed' | 'pending_2nd_weight' | '1st_weight_complete';
+  status: 'tare' | 'gross' | 'completed' | 'pending_2nd_weight' | '1st_weight_complete' | string;
   operatorId: string;
   operatorName: string;
+  adminName?: string;
   createdAt?: string;
   updatedAt?: string;
 }
 
 export interface WeighSlip {
-  slipNumber: string;
+  slipNumber?: string;
   sessionId: string;
   transactionNo: number;
-  vehicleRegNo: string;
+
+  // 24 Standard Weighment Slip Fields
+  companyName?: string;
+  companyAddress?: string;
+  phoneNo?: string;
   partyName?: string;
+  loadSlipNo?: string;
+  vehicleNo?: string;
+  vehicleRegNo: string;
+  cultivatorName?: string;
+  fatherName?: string;
+  mobileNo?: string;
+  status?: string;
+  moisture?: number;
+  bagsBales?: string;
+  chessAmount?: number;
+  firstWeight: number;
+  firstWeightDate?: string;
+  firstWeightTime?: string | null;
+  secondWeight: number;
+  secondWeightDate?: string;
+  secondWeightTime?: string | null;
+  nettWeight?: number;
+  netWeight: number;
+  village?: string;
+  locationName?: string;
+  rate?: number;
+  adminName?: string;
+
+  // Additional metadata & compatibility
   firmName?: string;
   product?: string;
   material: string;
   dateTime: string;
-  
-  firstWeight: number;
-  firstWeightTime?: string | null;
-  secondWeight: number;
-  secondWeightTime?: string | null;
-  
   tareWeight: number;
   grossWeight: number;
-  netWeight: number;
-  
-  rate?: number;
-  moisture?: number;
   deduction?: number;
   charges?: number;
   vehicleType?: string;
-  bagsBales?: string;
   agent?: string;
-  village?: string;
   chessNo?: string;
-  chessAmount?: number;
   chessName?: string;
   finalRate?: number;
   totalAmount?: number;
   printOptions?: PrintOptions;
-  
-  driverName: string;
-  destination: string;
+  driverName?: string;
+  destination?: string;
   operatorName: string;
   evidence: Evidence[];
   createdAt?: string;
@@ -122,9 +154,31 @@ export interface CameraConfig {
   streamUrl?: string;
 }
 
-export type ThirdPartyScaleMode = 'web_serial' | 'file_monitor' | 'tcp_socket' | 'http_push' | 'simulated';
+export type ThirdPartyScaleMode = 'ventek_vms' | 'web_serial' | 'file_monitor' | 'tcp_socket' | 'http_push' | 'simulated';
 
-export type ScaleProtocol = 'standard_ascii' | 'avery_e1205' | 'essae' | 'toledo' | 'eagle' | 'custom';
+export type ScaleProtocol = 'standard_ascii' | 'ventek_vms' | 'avery_e1205' | 'essae' | 'toledo' | 'eagle' | 'custom';
+
+export interface WeighbridgeDeviceConfig {
+  id: string;
+  deviceCode: string;
+  displayName: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  capacityKg: number;
+  port: string;
+  baudRate: number;
+  interfaceType: string;
+  dataBits: number;
+  stopBits: number;
+  parity: 'none' | 'even' | 'odd';
+  sampleTimeMs: number;
+  byteRange: string;
+  unitType: 'Qtl' | 'kg';
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
 
 export interface ThirdPartyScaleConfig {
   enabled: boolean;
@@ -139,6 +193,7 @@ export interface ThirdPartyScaleConfig {
   tcpPort: number;
   pollIntervalMs: number;
   connected?: boolean;
+  serialPort?: string;
   lastReading?: WeightReading;
   rawSample?: string;
 }

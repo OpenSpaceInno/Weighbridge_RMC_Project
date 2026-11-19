@@ -86,7 +86,29 @@ export default function Billing() {
 
   const handleFormSubmit = async (data: any) => {
     if (editInvoice) {
+      const subtotal = (data.items || []).reduce((sum: number, item: any) => sum + (Number(item.amount) || (Number(item.quantity) * Number(item.unitPrice)) || 0), 0);
+      const taxAmount = (data.items || []).reduce((sum: number, item: any) => sum + (Number(item.taxAmount) || 0), 0);
+      const discountAmount = Number(data.discountAmount) || 0;
+      const totalAmount = subtotal + taxAmount - discountAmount;
+      const paidAmount = Number(editInvoice.paidAmount) || 0;
+      const balanceAmount = Math.max(0, totalAmount - paidAmount);
+
       await updateInvoice(editInvoice.id, {
+        customerId: data.customerId || editInvoice.customerId,
+        customerName: data.customerName,
+        customerAddress: data.customerAddress,
+        customerEmail: data.customerEmail,
+        customerPhone: data.customerPhone,
+        customerGST: data.customerGST,
+        tripIds: data.tripIds || editInvoice.tripIds,
+        items: data.items,
+        subtotal,
+        taxAmount,
+        discountAmount,
+        totalAmount,
+        paidAmount,
+        balanceAmount,
+        dueDate: data.dueDate,
         notes: data.notes,
         terms: data.terms,
       });

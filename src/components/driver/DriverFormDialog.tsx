@@ -46,16 +46,23 @@ export function DriverFormDialog({ open, onOpenChange, driver, onSave }: DriverF
   useEffect(() => {
     if (driver) {
       setFormData({
-        name: driver.name,
-        phone: driver.phone,
-        email: driver.email,
-        dateOfBirth: driver.dateOfBirth,
-        address: driver.address,
-        employeeId: driver.employeeId,
-        dateOfJoining: driver.dateOfJoining,
-        status: driver.status,
-        emergencyContact: { ...driver.emergencyContact },
-        license: { ...driver.license },
+        name: driver.name || '',
+        phone: driver.phone || '',
+        email: driver.email || '',
+        dateOfBirth: driver.dateOfBirth || '',
+        address: driver.address || '',
+        employeeId: driver.employeeId || '',
+        dateOfJoining: driver.dateOfJoining || '',
+        status: driver.status || 'available',
+        emergencyContact: {
+          name: driver.emergencyContact?.name || '',
+          relation: driver.emergencyContact?.relation || '',
+          phone: driver.emergencyContact?.phone || '',
+        },
+        license: {
+          ...defaultLicense,
+          ...(driver.license || {}),
+        },
         assignedVehicle: driver.assignedVehicle,
       });
     } else {
@@ -188,6 +195,7 @@ export function DriverFormDialog({ open, onOpenChange, driver, onSave }: DriverF
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="available">Available</SelectItem>
+                    <SelectItem value="on_trip">On Trip</SelectItem>
                     <SelectItem value="on_leave">On Leave</SelectItem>
                     <SelectItem value="suspended">Suspended</SelectItem>
                     <SelectItem value="inactive">Inactive</SelectItem>

@@ -319,6 +319,12 @@ class ApiClient {
     return this.request<any[]>('/weighbridge/pending-vehicles');
   }
 
+  async getPendingVehicleByNo(vehicleNo: string) {
+    return this.request<{ success: boolean; session?: any; message?: string }>(
+      `/weighbridge/pending-vehicle/${encodeURIComponent(vehicleNo)}`
+    );
+  }
+
   async uploadWeighbridgeSnapshots(data: {
     transactionNo?: number;
     vehicleRegNo?: string;
@@ -351,20 +357,29 @@ class ApiClient {
     });
   }
 
-  // Third-Party Weighbridge Software Integration
+  // Third-Party & Ventek Weighbridge Integration
   async getLiveScaleWeight() {
     return this.request<{
       weight: number;
+      weightQtl?: number;
       unit: 'kg' | 'ton';
       stable: boolean;
       zero: boolean;
       timestamp: string;
       source: string;
       connected: boolean;
+      serialConnected?: boolean;
+      serialPort?: string;
+      baudRate?: number;
+      deviceCode?: string;
+      deviceName?: string;
+      model?: string;
+      unitType?: string;
+      capacityKg?: number;
     }>('/weighbridge/live-weight');
   }
 
-  async pushThirdPartyWeight(data: { weight: number; unit?: 'kg' | 'ton'; stable?: boolean; source?: string }) {
+  async pushThirdPartyWeight(data: { weight?: number; weightQtl?: number; unit?: 'kg' | 'ton'; stable?: boolean; source?: string }) {
     return this.request<{ success: boolean; message: string; reading: any }>('/weighbridge/third-party/push', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -377,7 +392,7 @@ class ApiClient {
     });
   }
 
-  async simulateScaleWeight(data: { weight: number; stable?: boolean }) {
+  async simulateScaleWeight(data: { weight?: number; weightQtl?: number; stable?: boolean }) {
     return this.request<{ success: boolean; message: string; reading: any }>('/weighbridge/third-party/simulate', {
       method: 'POST',
       body: JSON.stringify(data),
@@ -386,6 +401,64 @@ class ApiClient {
 
   async testScaleSource(data: { mode: string; filePath?: string; tcpHost?: string; tcpPort?: number }) {
     return this.request<{ success: boolean; message: string; exists?: boolean; sampleContent?: string; error?: string }>('/weighbridge/third-party/test-source', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getWeighbridgeDeviceConfig() {
+    return this.request<{
+      success: boolean;
+      device: import('../types/weighbridge').WeighbridgeDeviceConfig;
+      status: {
+        connected: boolean;
+        lastError: string | null;
+        lastReadingTime: string | null;
+        lastRawPacket: string;
+        currentWeightKg: number;
+        currentWeightQtl: number;
+      };
+    }>('/weighbridge/device/config');
+  }
+
+  async updateWeighbridgeDeviceConfig(data: Partial<import('../types/weighbridge').WeighbridgeDeviceConfig>) {
+    return this.request<{
+      success: boolean;
+      message: string;
+      config: import('../types/weighbridge').WeighbridgeDeviceConfig;
+      connected: boolean;
+    }>('/weighbridge/device/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getSerialPorts() {
+    return this.request<{
+      success: boolean;
+      ports: Array<{
+        path: string;
+        manufacturer: string;
+        friendlyName: string;
+        pnpId?: string;
+        productId?: string;
+        vendorId?: string;
+      }>;
+      activePort: string;
+    }>('/weighbridge/ports');
+  }
+
+  async testWeighbridgeDevice(data: { port: string; baudRate?: number }) {
+    return this.request<{
+      success: boolean;
+      port: string;
+      baudRate: number;
+      availableOnSystem: boolean;
+      allPorts: string[];
+      message: string;
+      currentConnected: boolean;
+      lastError: string | null;
+    }>('/weighbridge/device/test', {
       method: 'POST',
       body: JSON.stringify(data),
     });
@@ -701,6 +774,134 @@ class ApiClient {
       body: JSON.stringify(data),
     });
   }
+
+  // Reports Module (47-Field Registry, Dynamic Filtering & Print)
+  async getReportFields(userId: string = 'default', reportType: string = 'weighment_report') {
+    return this.request<Array<{ sNo: number; fieldKey: string; fieldName: string; isSelected: boolean; displayOrder: number }>>(
+      `/reports/fields?userId=${encodeURIComponent(userId)}&reportType=${encodeURIComponent(reportType)}`
+    );
+  }
+
+  async saveReportFields(
+    fields: Array<{ sNo?: number; fieldKey: string; fieldName?: string; isSelected: boolean; displayOrder?: number }>,
+    userId: string = 'default',
+    reportType: string = 'weighment_report'
+  ) {
+    return this.request<{ success: boolean; message: string }>('/reports/fields/config', {
+      method: 'POST',
+      body: JSON.stringify({ userId, reportType, fields }),
+    });
+  }
+
+  async getReportFilterOptions() {
+    return this.request<{ parties: string[]; products: string[]; statuses: string[]; users: string[] }>('/reports/filter-options');
+  }
+
+  async searchReports(params: Record<string, any> = {}) {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') {
+        query.append(k, String(v));
+      }
+    });
+    return this.request<{ success: boolean; count: number; data: any[] }>(`/reports/search?${query.toString()}`);
+  }
+
+  async getPartyTotals(params: Record<string, any> = {}) {
+    const query = new URLSearchParams();
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== '') {
+        query.append(k, String(v));
+      }
+    });
+    return this.request<{ success: boolean; partyTotals: any[]; grandTotals: any }>(`/reports/party-totals?${query.toString()}`);
+  }
+
+  async getReportTransactionForPrint(id: string | number) {
+    return this.request<{
+      success: boolean;
+      transaction: any;
+      rawSession: any;
+      fieldConfigs: Array<{ sNo: number; fieldKey: string; fieldName: string; isSelected: boolean; displayOrder: number }>;
+      company: any;
+    }>(`/reports/transaction/${id}`);
+  }
+
+  // Gate Monitor <-> Weighbridge Vehicle Synchronization
+  async getLatestGateVehicle() {
+    return this.request<{
+      success: boolean;
+      vehicleRegNo?: string;
+      confidence?: number;
+      source?: string;
+      timestamp?: string;
+      cameraId?: string;
+      matchedVehicle?: {
+        make?: string;
+        model?: string;
+        driverName?: string;
+        partyName?: string;
+        product?: string;
+      };
+      message?: string;
+    }>('/gate/latest-vehicle');
+  }
+
+  async postLatestGateVehicle(data: { vehicleRegNo: string; confidence?: number; source?: string; cameraId?: string }) {
+    return this.request<{ success: boolean; vehicleRegNo: string; message: string }>('/gate/latest-vehicle', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getRecentGateVehicles() {
+    return this.request<{
+      success: boolean;
+      count: number;
+      vehicles: Array<{
+        id: number;
+        vehicleRegNo: string;
+        confidence: number;
+        source: string;
+        timestamp: string;
+        partyName?: string;
+        product?: string;
+        driverName?: string;
+      }>;
+    }>('/gate/recent-vehicles');
+  }
+
+  async clearGateVehicle() {
+    return this.request<{ success: boolean; message: string }>('/gate/clear-vehicle', {
+      method: 'POST',
+    });
+  }
+
+  async getFtpStatus() {
+    return this.request<{
+      success: boolean;
+      running: boolean;
+      host: string;
+      port: number;
+      remoteDir: string;
+      totalFilesSeen: number;
+      processedCount: number;
+      lastPollTime: string | null;
+      lastError: string | null;
+      latestDetection: any;
+    }>('/gate/ftp-status');
+  }
+
+  async syncFtpNow(loadLatestExisting = false) {
+    return this.request<{
+      success: boolean;
+      detection: any;
+    }>('/gate/ftp-sync-now', {
+      method: 'POST',
+      body: JSON.stringify({ loadLatestExisting }),
+    });
+  }
+
 
 }
 

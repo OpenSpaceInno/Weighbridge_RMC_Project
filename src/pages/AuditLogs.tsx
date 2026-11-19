@@ -61,6 +61,17 @@ const actionBadgeColors: Record<AuditAction, string> = {
   LOGIN: 'bg-slate-500/10 text-slate-600',
 };
 
+const safeFormatDate = (dateVal: any, fmt: string, fallback = '—') => {
+  if (!dateVal) return fallback;
+  try {
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return fallback;
+    return format(d, fmt);
+  } catch (e) {
+    return fallback;
+  }
+};
+
 export default function AuditLogs() {
   const { logs, stats, liveStreaming, setLiveStreaming, clearLogs } = useAuditLogs();
   const { toast } = useToast();
@@ -76,13 +87,19 @@ export default function AuditLogs() {
   const filteredLogs = useMemo(() => {
     return logs.filter(log => {
       const query = searchQuery.toLowerCase().trim();
+      const pName = (typeof log.performedBy === 'object' && log.performedBy?.name) ? log.performedBy.name : (typeof log.performedBy === 'string' ? log.performedBy : '');
+      const pRole = (typeof log.performedBy === 'object' && log.performedBy?.role) ? log.performedBy.role : '';
+      const entityId = log.entityId || '';
+      const details = log.details || '';
+      const logId = log.id || '';
+
       const matchesSearch = 
         !query ||
-        log.id.toLowerCase().includes(query) ||
-        log.entityId.toLowerCase().includes(query) ||
-        log.details.toLowerCase().includes(query) ||
-        log.performedBy.name.toLowerCase().includes(query) ||
-        log.performedBy.role.toLowerCase().includes(query);
+        logId.toLowerCase().includes(query) ||
+        entityId.toLowerCase().includes(query) ||
+        details.toLowerCase().includes(query) ||
+        pName.toLowerCase().includes(query) ||
+        pRole.toLowerCase().includes(query);
 
       const matchesModule = selectedModule === 'all' || log.module === selectedModule;
       const matchesAction = selectedAction === 'all' || log.action === selectedAction;
@@ -97,14 +114,14 @@ export default function AuditLogs() {
     const headers = ['Audit ID', 'Timestamp', 'Module', 'Action', 'Entity ID', 'Operator', 'Role', 'Severity', 'Details', 'Checksum'];
     const rows = filteredLogs.map(l => [
       l.id,
-      format(new Date(l.timestamp), 'yyyy-MM-dd HH:mm:ss'),
+      safeFormatDate(l.timestamp, 'yyyy-MM-dd HH:mm:ss'),
       l.module,
       l.action,
-      `"${l.entityId}"`,
-      `"${l.performedBy.name}"`,
-      `"${l.performedBy.role}"`,
+      `"${l.entityId || ''}"`,
+      `"${(typeof l.performedBy === 'object' && l.performedBy?.name) ? l.performedBy.name : (typeof l.performedBy === 'string' ? l.performedBy : 'System')}"`,
+      `"${(typeof l.performedBy === 'object' && l.performedBy?.role) ? l.performedBy.role : 'operator'}"`,
       l.severity,
-      `"${l.details.replace(/"/g, '""')}"`,
+      `"${(l.details || '').replace(/"/g, '""')}"`,
       l.metadata?.verifiedHash || '',
     ]);
 
@@ -112,7 +129,7 @@ export default function AuditLogs() {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `rmc_audit_trail_${format(new Date(), 'yyyyMMdd_HHmm')}.csv`);
+    link.setAttribute('download', `rmc_audit_trail_${safeFormatDate(new Date(), 'yyyyMMdd_HHmm')}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -334,10 +351,10 @@ export default function AuditLogs() {
                     <tr key={log.id} className="hover:bg-muted/40 transition-colors">
                       <td className="py-3.5 pr-4 whitespace-nowrap">
                         <div className="font-mono text-xs text-foreground">
-                          {format(new Date(log.timestamp), 'HH:mm:ss')}
+                          {safeFormatDate(log.timestamp, 'HH:mm:ss')}
                         </div>
                         <div className="text-[11px] text-muted-foreground">
-                          {format(new Date(log.timestamp), 'dd MMM yyyy')}
+                          {safeFormatDate(log.timestamp, 'dd MMM yyyy')}
                         </div>
                       </td>
                       <td className="py-3.5 pr-4 font-mono text-xs font-semibold text-primary">
@@ -360,8 +377,8 @@ export default function AuditLogs() {
                         </div>
                       </td>
                       <td className="py-3.5 pr-4">
-                        <div className="font-medium text-foreground">{log.performedBy.name}</div>
-                        <div className="text-xs text-muted-foreground">{log.performedBy.role}</div>
+                        <div className="font-medium text-foreground">{(typeof log.performedBy === 'object' && log.performedBy?.name) ? log.performedBy.name : (typeof log.performedBy === 'string' ? log.performedBy : 'System Operator')}</div>
+                        <div className="text-xs text-muted-foreground">{(typeof log.performedBy === 'object' && log.performedBy?.role) ? log.performedBy.role : 'operator'}</div>
                       </td>
                       <td className="py-3.5 pr-4">
                         <Badge 
@@ -407,7 +424,7 @@ export default function AuditLogs() {
                   <DialogTitle className="font-mono">{selectedEntry.id}</DialogTitle>
                 </div>
                 <DialogDescription>
-                  Detailed audit payload recorded on {format(new Date(selectedEntry.timestamp), 'PPpp')}
+                  Detailed audit payload recorded on {safeFormatDate(selectedEntry.timestamp, 'PPpp')}
                 </DialogDescription>
               </DialogHeader>
 
@@ -433,7 +450,7 @@ export default function AuditLogs() {
                   </div>
                   <div className="p-3 border rounded-lg bg-card">
                     <span className="text-xs text-muted-foreground">Performed By</span>
-                    <div className="font-semibold">{selectedEntry.performedBy.name} ({selectedEntry.performedBy.role})</div>
+                    <div className="font-semibold">{(typeof selectedEntry.performedBy === 'object' && selectedEntry.performedBy?.name) ? selectedEntry.performedBy.name : (typeof selectedEntry.performedBy === 'string' ? selectedEntry.performedBy : 'System Operator')} ({(typeof selectedEntry.performedBy === 'object' && selectedEntry.performedBy?.role) ? selectedEntry.performedBy.role : 'operator'})</div>
                   </div>
                 </div>
 

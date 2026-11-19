@@ -136,7 +136,10 @@ const VehicleManagement = () => {
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-primary ${filter === 'all' ? 'border-primary ring-1 ring-primary' : ''}`}
+          onClick={() => setFilter('all')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-primary/10">
@@ -150,7 +153,10 @@ const VehicleManagement = () => {
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-emerald-500 ${filter === 'available' ? 'border-emerald-500 ring-1 ring-emerald-500' : ''}`}
+          onClick={() => setFilter('available')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-emerald-500/10">
@@ -164,7 +170,10 @@ const VehicleManagement = () => {
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-blue-500 ${filter === 'in_transit' ? 'border-blue-500 ring-1 ring-blue-500' : ''}`}
+          onClick={() => setFilter('in_transit')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-blue-500/10">
@@ -178,7 +187,10 @@ const VehicleManagement = () => {
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-amber-500 ${filter === 'maintenance' ? 'border-amber-500 ring-1 ring-amber-500' : ''}`}
+          onClick={() => setFilter('maintenance')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-amber-500/10">
@@ -192,7 +204,10 @@ const VehicleManagement = () => {
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-muted-foreground ${filter === 'inactive' ? 'border-muted-foreground ring-1 ring-muted-foreground' : ''}`}
+          onClick={() => setFilter('inactive')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-muted">
@@ -206,7 +221,10 @@ const VehicleManagement = () => {
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-border/50">
+        <Card 
+          className={`bg-card border-border/50 cursor-pointer transition-colors hover:border-destructive ${filter === 'expiring_docs' ? 'border-destructive ring-1 ring-destructive' : ''}`}
+          onClick={() => setFilter('expiring_docs')}
+        >
           <CardContent className="pt-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-destructive/10">
@@ -235,13 +253,14 @@ const VehicleManagement = () => {
       </div>
 
       {/* Tabs */}
-      <Tabs value={filter} onValueChange={(v) => setFilter(v as Vehicle['status'] | 'all')}>
-        <TabsList>
+      <Tabs value={filter} onValueChange={(v) => setFilter(v as any)}>
+        <TabsList className="grid grid-cols-3 sm:grid-cols-6 w-full sm:w-auto h-auto gap-1">
           <TabsTrigger value="all">All ({allVehicles.length})</TabsTrigger>
           <TabsTrigger value="available">Available ({stats.available})</TabsTrigger>
           <TabsTrigger value="in_transit">In Transit ({stats.inTransit})</TabsTrigger>
           <TabsTrigger value="maintenance">Maintenance ({stats.maintenance})</TabsTrigger>
           <TabsTrigger value="inactive">Inactive ({stats.inactive})</TabsTrigger>
+          <TabsTrigger value="expiring_docs">Expiring Docs ({stats.expiringDocuments})</TabsTrigger>
         </TabsList>
 
         <TabsContent value={filter} className="mt-6">
@@ -255,6 +274,7 @@ const VehicleManagement = () => {
                   onEdit={handleEdit}
                   onDelete={deleteVehicle}
                   onAssignDriver={handleAssignDriver}
+                  onStatusChange={updateStatus}
                 />
               ))}
             </div>

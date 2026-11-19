@@ -1,0 +1,761 @@
+{
+  "localVersion": "8.0.45",
+  "remoteVersion": "8.0.46",
+  "localTablesCount": 44,
+  "remoteTablesCount": 45,
+  "tables": [
+    {
+      "table": "anpr_config",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [
+        "camera_id -> camera_devices.device_id"
+      ],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "anpr_events",
+      "existsOnRemote": true,
+      "localRowCount": 11,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "anpr_evidence",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at"
+      ],
+      "foreignKeys": [
+        "event_id -> anpr_events.event_id"
+      ],
+      "missingInRemote": [],
+      "missingInLocal": [
+        "metadata",
+        "updated_at"
+      ],
+      "typeMismatches": [
+        "id: local(int) != remote(varchar)",
+        "evidence_type: local(enum) != remote(varchar)",
+        "angle: local(enum) != remote(varchar)",
+        "created_at: local(timestamp) != remote(datetime)"
+      ]
+    },
+    {
+      "table": "audit_logs",
+      "existsOnRemote": true,
+      "localRowCount": 51,
+      "remoteRowCount": 47,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "camera_devices",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [
+        "plant_id"
+      ],
+      "typeMismatches": []
+    },
+    {
+      "table": "company_settings",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "device_ftp_config",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "device_network_config",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [
+        "device_id -> camera_devices.device_id"
+      ],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "device_rtsp_config",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [
+        "device_id -> camera_devices.device_id"
+      ],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "dispatches",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "driver_trip_assignments",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "drivers",
+      "existsOnRemote": true,
+      "localRowCount": 3,
+      "remoteRowCount": 3,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "exit_verifications",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "fuel_records",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "date",
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "generated_reports",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "incidents",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 1,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "inventory_items",
+      "existsOnRemote": true,
+      "localRowCount": 5,
+      "remoteRowCount": 5,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "invoices",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 1,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "loading_bays",
+      "existsOnRemote": true,
+      "localRowCount": 4,
+      "remoteRowCount": 4,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "loading_sessions",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "session_id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "maintenance_tasks",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 1,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "parts_inventory",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "payments",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "date",
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "plants",
+      "existsOnRemote": true,
+      "localRowCount": 5,
+      "remoteRowCount": 5,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "reorder_alerts",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "report_field_configs",
+      "existsOnRemote": true,
+      "localRowCount": 47,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "roles",
+      "existsOnRemote": true,
+      "localRowCount": 8,
+      "remoteRowCount": 10,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_billing_sync",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_connection_config",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 1,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_exit_sync",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 1,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_outbound_deliveries",
+      "existsOnRemote": true,
+      "localRowCount": 4,
+      "remoteRowCount": 4,
+      "primaryKey": [
+        "delivery_number"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_purchase_orders",
+      "existsOnRemote": true,
+      "localRowCount": 7,
+      "remoteRowCount": 7,
+      "primaryKey": [
+        "po_number"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_sync_queue",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "sap_weighbridge_sync",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "stock_movements",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "date",
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "trip_events",
+      "existsOnRemote": true,
+      "localRowCount": 2,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "trips",
+      "existsOnRemote": true,
+      "localRowCount": 4,
+      "remoteRowCount": 2,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "users",
+      "existsOnRemote": true,
+      "localRowCount": 11,
+      "remoteRowCount": 14,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "vehicle_documents",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "vehicle_maintenance",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "vehicles",
+      "existsOnRemote": true,
+      "localRowCount": 4,
+      "remoteRowCount": 4,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "weigh_slips",
+      "existsOnRemote": true,
+      "localRowCount": 0,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "slip_number"
+      ],
+      "trackingCols": [
+        "created_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "weighbridge_devices",
+      "existsOnRemote": true,
+      "localRowCount": 1,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "id"
+      ],
+      "trackingCols": [
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    },
+    {
+      "table": "weighbridge_sessions",
+      "existsOnRemote": true,
+      "localRowCount": 3,
+      "remoteRowCount": 0,
+      "primaryKey": [
+        "session_id"
+      ],
+      "trackingCols": [
+        "timestamp",
+        "created_at",
+        "updated_at"
+      ],
+      "foreignKeys": [],
+      "missingInRemote": [],
+      "missingInLocal": [],
+      "typeMismatches": []
+    }
+  ],
+  "triggers": [],
+  "views": [],
+  "events": []
+}

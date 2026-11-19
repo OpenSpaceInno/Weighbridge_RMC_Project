@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import Hls from 'hls.js';
 import { CameraDevice, RTSPConfig } from '@/types/deviceConfig';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -68,27 +69,57 @@ export function LiveStreamViewer({
     }
 
     // Check if HLS proxy is configured for browser playback
-    if (rtspConfig.hlsProxyUrl) {
+    if (rtspConfig.hlsProxyUrl && videoRef.current) {
       setStreamStatus('connecting');
       setErrorMessage(null);
 
-      // Try to load HLS stream
-      const connectTimer = setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.src = rtspConfig.hlsProxyUrl;
-          videoRef.current.load();
+      const video = videoRef.current;
+      let hlsInstance: Hls | null = null;
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true,
+          manifestLoadingTimeOut: 3000,
+        });
+        hlsInstance = hls;
+        hls.loadSource(rtspConfig.hlsProxyUrl);
+        hls.attachMedia(video);
+
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          setStreamStatus('connected');
+          video.play().catch(() => {});
+        });
+
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data.fatal) {
+            setStreamStatus('error');
+            setErrorMessage('Stream connection error');
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = rtspConfig.hlsProxyUrl;
+        video.addEventListener('loadedmetadata', () => {
+          setStreamStatus('connected');
+          video.play().catch(() => {});
+        });
+        video.addEventListener('error', () => {
+          setStreamStatus('error');
+          setErrorMessage('Stream playback error');
+        });
+      }
+
+      // Frame counter for active stream telemetry
+      const frameInterval = setInterval(() => {
+        setFrameCount(prev => prev + 1);
+      }, 1000 / 30);
+
+      return () => {
+        clearInterval(frameInterval);
+        if (hlsInstance) {
+          hlsInstance.destroy();
         }
-        setStreamStatus('connected');
-        
-        // Simulate frame counter
-        const frameInterval = setInterval(() => {
-          setFrameCount(prev => prev + 1);
-        }, 1000 / 30);
-
-        return () => clearInterval(frameInterval);
-      }, 1500);
-
-      return () => clearTimeout(connectTimer);
+      };
     } else {
       // No HLS proxy - show RTSP URL for external player
       setStreamStatus('no_proxy');

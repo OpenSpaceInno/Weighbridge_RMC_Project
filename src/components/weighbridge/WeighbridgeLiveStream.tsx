@@ -54,8 +54,8 @@ export const AVAILABLE_CAMERAS: CameraSource[] = [
     name: 'ANPR Entry Camera',
     badge: 'CAM 01 • ANPR',
     role: 'Front Bumper / Plate OCR',
-    ip: '192.168.0.100',
-    rtsp: 'rtsp://admin:Password@123@192.168.0.100:554/ch1/main/av_stream',
+    ip: '192.168.0.101',
+    rtsp: 'rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream',
     hls: 'http://localhost:8888/cam1/index.m3u8',
     resolution: '3K UHD (2880x1620)',
     defaultAngle: 'front',
@@ -553,7 +553,7 @@ export function WeighbridgeLiveStream({
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground mt-0.5 font-mono">
-                Concurrent Multi-Screen: CAM 01 (192.168.0.100) • CAM 02 (192.168.0.99) • CAM 03 (192.168.0.99)
+                Concurrent Multi-Screen: CAM 01 (192.168.0.101) • CAM 02 (192.168.0.99) • CAM 03 (192.168.0.99)
               </p>
             </div>
           </div>

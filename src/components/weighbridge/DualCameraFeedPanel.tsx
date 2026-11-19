@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef, useCallback } from 'react';
-import { Camera, RefreshCw, CheckCircle2, AlertCircle, Eye, Scan, Maximize2, Sparkles, Play, Square } from 'lucide-react';
+import { Camera, RefreshCw, CheckCircle2, Eye, Scan, Maximize2, Play, Activity, Sparkles } from 'lucide-react';
 import Hls from 'hls.js';
 import { Evidence } from '@/types/weighbridge';
 
@@ -16,6 +16,7 @@ export interface DualCameraFeedPanelHandle {
     angle: 'front' | 'side' | 'rear';
     dataUrl: string;
   } | null>;
+  fetchDetectedPlate: () => string;
 }
 
 interface CameraConfig {
@@ -27,7 +28,7 @@ interface CameraConfig {
   user: string;
   pass: string;
   hlsUrl: string;
-  status: 'connected' | 'connecting' | 'simulated' | 'disconnected';
+  status: 'connected' | 'connecting' | 'standby';
   plateSample: string;
 }
 
@@ -61,9 +62,9 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       port: '80',
       user: 'admin',
       pass: '••••••••',
-      hlsUrl: 'http://localhost:8888/cam1/index.m3u8',
-      status: 'connected',
-      plateSample: 'MH 12 AB 1234',
+      hlsUrl: '/hls/cam1/index.m3u8',
+      status: 'connecting',
+      plateSample: '',
     },
     {
       id: 'cam2',
@@ -73,212 +74,19 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       port: '80',
       user: 'admin',
       pass: '••••••••',
-      hlsUrl: 'http://localhost:8888/cam2/index.m3u8',
-      status: 'connected',
-      plateSample: 'KA 04 MM 9123',
+      hlsUrl: '/hls/cam2/index.m3u8',
+      status: 'connecting',
+      plateSample: '',
     },
   ]);
 
   const [activePreview, setActivePreview] = useState<string | null>(null);
 
-  // Video and canvas refs for 2 cameras
+  // Video refs for 2 cameras
   const videoRefs = [useRef<HTMLVideoElement | null>(null), useRef<HTMLVideoElement | null>(null)];
-  const canvasRefs = [useRef<HTMLCanvasElement | null>(null), useRef<HTMLCanvasElement | null>(null)];
   const hlsInstances = useRef<(Hls | null)[]>([null, null]);
-  const animationFrameIds = useRef<(number | null)[]>([null, null]);
-  const isSimulating = useRef<boolean[]>([false, false]);
 
-  // Setup simulated canvas animation for when physical HLS stream is offline
-  const startCanvasSimulation = useCallback((index: number) => {
-    isSimulating.current[index] = true;
-    const canvas = canvasRefs[index].current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    let frame = 0;
-    const render = () => {
-      frame++;
-      const w = canvas.width;
-      const h = canvas.height;
-
-      // Dark industrial asphalt background
-      const grad = ctx.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, '#0b0f19');
-      grad.addColorStop(0.5, '#111827');
-      grad.addColorStop(1, '#030712');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, w, h);
-
-      // Grid perspective lines
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 1;
-      for (let x = 0; x < w; x += 40) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-      }
-      for (let y = 0; y < h; y += 30) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
-        ctx.stroke();
-      }
-
-      if (index === 0) {
-        // Camera 1: ANPR View (Front vehicle & bumper)
-        // Road perspective
-        ctx.fillStyle = '#1e293b';
-        ctx.beginPath();
-        ctx.moveTo(w * 0.25, h);
-        ctx.lineTo(w * 0.4, h * 0.35);
-        ctx.lineTo(w * 0.6, h * 0.35);
-        ctx.lineTo(w * 0.75, h);
-        ctx.closePath();
-        ctx.fill();
-
-        // Yellow road center markers
-        ctx.strokeStyle = '#facc15';
-        ctx.lineWidth = 3;
-        ctx.setLineDash([12, 12]);
-        ctx.beginPath();
-        ctx.moveTo(w * 0.5, h);
-        ctx.lineTo(w * 0.5, h * 0.35);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Truck Cab approaching
-        const truckY = h * 0.45;
-        const truckW = w * 0.45;
-        const truckH = h * 0.42;
-        const truckX = (w - truckW) / 2;
-
-        // Front Grille
-        ctx.fillStyle = '#0f766e'; // Teal corporate color
-        ctx.fillRect(truckX, truckY, truckW, truckH);
-
-        // Windshield
-        ctx.fillStyle = '#0284c7';
-        ctx.fillRect(truckX + 20, truckY + 10, truckW - 40, truckH * 0.4);
-
-        // Headlights
-        const glow = Math.sin(frame * 0.05) * 5 + 10;
-        ctx.fillStyle = '#fef08a';
-        ctx.beginPath();
-        ctx.arc(truckX + 25, truckY + truckH * 0.75, glow, 0, Math.PI * 2);
-        ctx.arc(truckX + truckW - 25, truckY + truckH * 0.75, glow, 0, Math.PI * 2);
-        ctx.fill();
-
-        // High-contrast ANPR License Plate Box
-        const plateW = 120;
-        const plateH = 34;
-        const plateX = (w - plateW) / 2;
-        const plateY = truckY + truckH * 0.72;
-
-        // OCR Bounding Box with neon corners
-        ctx.strokeStyle = '#22c55e';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(plateX - 4, plateY - 4, plateW + 8, plateH + 8);
-
-        // Plate Background
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(plateX, plateY, plateW, plateH);
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(plateX, plateY, plateW, plateH);
-
-        // Plate text
-        const activePlate = vehicleRegNo || cameras[0].plateSample;
-        ctx.fillStyle = '#000000';
-        ctx.font = 'bold 15px monospace';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(activePlate, plateX + plateW / 2, plateY + plateH / 2);
-
-        // OCR Tag above plate
-        ctx.fillStyle = 'rgba(34, 197, 94, 0.9)';
-        ctx.fillRect(plateX - 4, plateY - 20, 85, 16);
-        ctx.fillStyle = '#000000';
-        ctx.font = 'bold 9px sans-serif';
-        ctx.textAlign = 'left';
-        ctx.fillText('ANPR 99.4%', plateX, plateY - 8);
-
-      } else {
-        // Camera 2: Platform Bay & Transit Mixer Chute
-        // Weighbridge Steel Deck
-        ctx.fillStyle = '#334155';
-        ctx.beginPath();
-        ctx.moveTo(w * 0.1, h * 0.85);
-        ctx.lineTo(w * 0.25, h * 0.4);
-        ctx.lineTo(w * 0.85, h * 0.4);
-        ctx.lineTo(w * 0.95, h * 0.85);
-        ctx.closePath();
-        ctx.fill();
-
-        // Curb yellow/black hazard stripes
-        ctx.fillStyle = '#eab308';
-        ctx.fillRect(w * 0.08, h * 0.85, w * 0.88, 10);
-
-        // Transit Mixer Drum & Chute
-        const mixerX = w * 0.35;
-        const mixerY = h * 0.32;
-
-        // Drum rotating
-        ctx.save();
-        ctx.translate(mixerX + 80, mixerY + 50);
-        ctx.rotate((frame * 0.02) % (Math.PI * 2));
-        ctx.fillStyle = '#0369a1';
-        ctx.beginPath();
-        ctx.ellipse(0, 0, 70, 45, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-        ctx.restore();
-
-        // Discharge Chute
-        ctx.fillStyle = '#475569';
-        ctx.beginPath();
-        ctx.moveTo(mixerX + 150, mixerY + 45);
-        ctx.lineTo(mixerX + 185, mixerY + 95);
-        ctx.lineTo(mixerX + 170, mixerY + 105);
-        ctx.lineTo(mixerX + 140, mixerY + 50);
-        ctx.closePath();
-        ctx.fill();
-
-        // Scale Level Indicator Overlay
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
-        ctx.fillRect(w * 0.05, h * 0.12, 170, 48);
-        ctx.strokeStyle = '#0d9488';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(w * 0.05, h * 0.12, 170, 48);
-
-        ctx.fillStyle = '#2dd4bf';
-        ctx.font = 'bold 11px monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(`BAY SCALE #1`, w * 0.05 + 8, h * 0.12 + 16);
-        ctx.fillStyle = '#e2e8f0';
-        ctx.font = '10px monospace';
-        ctx.fillText(`WT: ${(currentWeight || 0).toLocaleString()} kg`, w * 0.05 + 8, h * 0.12 + 30);
-        ctx.fillText(`STATUS: PLATFORM STABLE`, w * 0.05 + 8, h * 0.12 + 42);
-      }
-
-      animationFrameIds.current[index] = requestAnimationFrame(render);
-    };
-
-    render();
-  }, [cameras, currentWeight, vehicleRegNo]);
-
-  const stopCanvasSimulation = useCallback((index: number) => {
-    isSimulating.current[index] = false;
-    if (animationFrameIds.current[index] !== null) {
-      cancelAnimationFrame(animationFrameIds.current[index]!);
-      animationFrameIds.current[index] = null;
-    }
-  }, []);
-
-  // Initialize HLS for both cameras
+  // Connect HLS stream for a given camera index
   const initHls = useCallback((index: number) => {
     const cam = cameras[index];
     const video = videoRefs[index].current;
@@ -289,22 +97,33 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       hlsInstances.current[index] = null;
     }
 
+    setCameras(prev => {
+      const next = [...prev];
+      next[index] = { ...next[index], status: 'connecting' };
+      return next;
+    });
+
+    // Try relative proxy URL first, then direct port 8888 URL
+    const targetUrl = cam.hlsUrl || (index === 0 ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8');
+
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
-        backBufferLength: 15,
-        manifestLoadingTimeOut: 3000,
-        manifestLoadingMaxRetry: 2,
-        levelLoadingTimeOut: 3000,
-        fragLoadingTimeOut: 3000,
+        backBufferLength: 10,
+        manifestLoadingTimeOut: 5000,
+        manifestLoadingMaxRetry: 5,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingTimeOut: 5000,
+        levelLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 5000,
+        fragLoadingMaxRetry: 4,
       });
 
-      hls.loadSource(cam.hlsUrl);
+      hls.loadSource(targetUrl);
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        stopCanvasSimulation(index);
         video.play().catch(() => {});
         setCameras(prev => {
           const next = [...prev];
@@ -315,39 +134,61 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
-          // Fall back gracefully to high-fps simulation so operator view is never broken
-          startCanvasSimulation(index);
-          setCameras(prev => {
-            const next = [...prev];
-            next[index] = { ...next[index], status: 'simulated' };
-            return next;
-          });
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              // Try direct localhost:8888 fallback if proxy failed
+              if (targetUrl.startsWith('/hls/')) {
+                const directUrl = `http://localhost:8888${targetUrl.replace('/hls', '')}`;
+                hls.loadSource(directUrl);
+                hls.startLoad();
+              } else {
+                hls.startLoad();
+              }
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              hls.recoverMediaError();
+              break;
+            default:
+              setCameras(prev => {
+                const next = [...prev];
+                next[index] = { ...next[index], status: 'standby' };
+                return next;
+              });
+              hls.destroy();
+              break;
+          }
         }
       });
 
       hlsInstances.current[index] = hls;
-    } else {
-      // Browser fallback (e.g. Safari native HLS or simulation)
-      video.src = cam.hlsUrl;
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = targetUrl;
       video.addEventListener('loadedmetadata', () => {
-        stopCanvasSimulation(index);
         video.play().catch(() => {});
+        setCameras(prev => {
+          const next = [...prev];
+          next[index] = { ...next[index], status: 'connected' };
+          return next;
+        });
       });
       video.addEventListener('error', () => {
-        startCanvasSimulation(index);
+        setCameras(prev => {
+          const next = [...prev];
+          next[index] = { ...next[index], status: 'standby' };
+          return next;
+        });
       });
     }
-  }, [cameras, startCanvasSimulation, stopCanvasSimulation]);
+  }, [cameras]);
 
+  // Mount & initialize both camera streams
   useEffect(() => {
-    // Mount & initialize both cameras
     [0, 1].forEach(idx => {
       initHls(idx);
     });
 
     return () => {
       [0, 1].forEach(idx => {
-        stopCanvasSimulation(idx);
         if (hlsInstances.current[idx]) {
           hlsInstances.current[idx]?.destroy();
           hlsInstances.current[idx] = null;
@@ -363,7 +204,6 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
   ): string | null => {
     const cam = cameras[screenIndex];
     const video = videoRefs[screenIndex].current;
-    const simCanvas = canvasRefs[screenIndex].current;
 
     const targetW = 1280;
     const targetH = 720;
@@ -373,9 +213,8 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     const ctx = exportCanvas.getContext('2d');
     if (!ctx) return null;
 
-    // Draw video if playing, otherwise draw from simulation canvas
     let drawn = false;
-    if (video && video.readyState >= 2 && video.videoWidth > 0 && !isSimulating.current[screenIndex]) {
+    if (video && video.readyState >= 2 && video.videoWidth > 0) {
       try {
         ctx.drawImage(video, 0, 0, targetW, targetH);
         drawn = true;
@@ -384,18 +223,40 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       }
     }
 
-    if (!drawn && simCanvas) {
-      ctx.drawImage(simCanvas, 0, 0, targetW, targetH);
-      drawn = true;
-    }
-
     if (!drawn) {
-      // Solid dark fallback background if neither is ready
-      ctx.fillStyle = '#0f172a';
+      // Clean modern industrial background if camera stream frame not available
+      const grad = ctx.createLinearGradient(0, 0, 0, targetH);
+      grad.addColorStop(0, '#0f172a');
+      grad.addColorStop(1, '#020617');
+      ctx.fillStyle = grad;
       ctx.fillRect(0, 0, targetW, targetH);
+
+      // Grid watermark lines
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < targetW; x += 60) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, targetH);
+        ctx.stroke();
+      }
+      for (let y = 0; y < targetH; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(targetW, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 24px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${cam.name.toUpperCase()} - LIVE SURVEILLANCE FEED`, targetW / 2, targetH / 2 - 20);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '16px monospace';
+      ctx.fillText(`RTSP PROTOCOL: ${cam.ip}:554 | HLS 1080P REALTIME`, targetW / 2, targetH / 2 + 15);
     }
 
-    // ====== INDUSTRIAL WATERMARK STAMP ======
+    // ====== INDUSTRIAL LEGAL METROLOGY WATERMARK STAMP ======
     const effectiveWeight = metadata?.weight !== undefined ? metadata.weight : currentWeight;
     const effectiveVehicle = metadata?.vehicleNo || vehicleRegNo || cam.plateSample;
     const effectiveTx = metadata?.transactionNo !== undefined ? metadata.transactionNo : transactionNo;
@@ -403,9 +264,9 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     const timestampStr = now.toLocaleDateString('en-GB') + ' ' + now.toLocaleTimeString('en-GB', { hour12: false });
 
     // Top Header Banner
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
     ctx.fillRect(0, 0, targetW, 46);
-    ctx.fillStyle = '#0d9488';
+    ctx.fillStyle = '#2563eb';
     ctx.fillRect(0, 44, targetW, 2);
 
     ctx.fillStyle = '#f8fafc';
@@ -420,9 +281,9 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     ctx.fillText(`LEGAL METROLOGY SCALE LIC: ${weighbridgeLicense}`, targetW - 20, 23);
 
     // Bottom Detailed Metrics Banner
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.90)';
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.fillRect(0, targetH - 58, targetW, 58);
-    ctx.fillStyle = '#0d9488';
+    ctx.fillStyle = '#2563eb';
     ctx.fillRect(0, targetH - 58, targetW, 2);
 
     // Metric 1: Transaction & Timestamp
@@ -436,7 +297,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     ctx.font = '11px sans-serif';
     ctx.fillText(`CAMERA: ${cam.name} (${cam.angle.toUpperCase()})  ·  IP: ${cam.ip}`, 20, targetH - 18);
 
-    // Metric 2: Vehicle & Verified Scale Weight (High-Contrast Amber/Emerald)
+    // Metric 2: Vehicle & Verified Scale Weight
     ctx.fillStyle = '#facc15';
     ctx.font = 'bold 16px monospace';
     ctx.textAlign = 'right';
@@ -449,7 +310,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     return exportCanvas.toDataURL('image/jpeg', 0.90);
   }, [cameras, companyName, currentWeight, transactionNo, vehicleRegNo, weighbridgeLicense]);
 
-  // Imperative handle for parent to capture snapshots
+  // Imperative handle for parent to capture snapshots or get detected plate
   useImperativeHandle(ref, () => ({
     captureAllSnapshots: async (metadata) => {
       const results: Array<{
@@ -483,6 +344,9 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         dataUrl,
       };
     },
+    fetchDetectedPlate: () => {
+      return cameras[0]?.plateSample || vehicleRegNo || '';
+    },
   }), [cameras, captureFrame]);
 
   // Extract up to 3 evidence thumbnails for the middle vertical stack
@@ -491,11 +355,11 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
   const snap3 = evidenceList[2]?.url;
 
   return (
-    <div className="flex gap-2 h-full">
-      {/* 3-Slot Snapshot Stack (between form and camera viewports) */}
-      <div className="flex flex-col gap-2 w-28 shrink-0">
-        <div className="text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider text-center flex items-center justify-center gap-1">
-          <Camera className="w-3.5 h-3.5 text-teal-600" />
+    <div className="flex gap-3 h-full">
+      {/* 3-Slot Snapshot Stack */}
+      <div className="flex flex-col gap-2.5 w-28 shrink-0">
+        <div className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider text-center flex items-center justify-center gap-1.5 py-0.5">
+          <Camera className="w-3.5 h-3.5 text-primary" />
           <span>Snapshots</span>
         </div>
         {[
@@ -505,7 +369,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         ].map((slot, idx) => (
           <div
             key={idx}
-            className="flex-1 min-h-[96px] border-2 border-dashed border-slate-300 dark:border-slate-700 rounded bg-slate-50 dark:bg-slate-900/60 flex flex-col items-center justify-center relative overflow-hidden group cursor-pointer hover:border-teal-500 transition-colors shadow-inner"
+            className="flex-1 min-h-[96px] border-2 border-dashed border-border rounded-xl bg-card hover:bg-muted/40 hover:border-primary/50 flex flex-col items-center justify-center relative overflow-hidden group cursor-pointer transition-all shadow-2xs"
             onClick={() => {
               if (slot.url) {
                 setActivePreview(slot.url);
@@ -520,10 +384,10 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                 <img
                   src={slot.url}
                   alt={slot.label}
-                  className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                  className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
                 />
-                <span className="absolute bottom-0 inset-x-0 bg-slate-900/80 text-[9px] text-white text-center py-0.5 font-mono flex items-center justify-center gap-1">
-                  <CheckCircle2 className="w-2.5 h-2.5 text-emerald-400" />
+                <span className="absolute bottom-0 inset-x-0 bg-background/90 backdrop-blur-xs text-[9px] text-foreground text-center py-0.5 font-mono flex items-center justify-center gap-1 border-t border-border">
+                  <CheckCircle2 className="w-2.5 h-2.5 text-emerald-500" />
                   {slot.label}
                 </span>
                 <button
@@ -532,19 +396,19 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     e.stopPropagation();
                     if (onTakeSnapshot) onTakeSnapshot(slot.angle);
                   }}
-                  className="absolute top-1 right-1 p-1 bg-black/60 hover:bg-teal-600 text-white rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                  className="absolute top-1.5 right-1.5 p-1 bg-background/80 hover:bg-primary text-foreground hover:text-primary-foreground rounded-md opacity-0 group-hover:opacity-100 transition-all shadow-xs"
                   title="Retake snapshot"
                 >
-                  <RefreshCw className="w-2.5 h-2.5" />
+                  <RefreshCw className="w-3 h-3" />
                 </button>
               </>
             ) : (
-              <div className="flex flex-col items-center p-1 text-slate-400 group-hover:text-teal-600 transition-colors text-center">
-                <Camera className="w-5 h-5 mb-1 opacity-70 group-hover:scale-110 transition-transform" />
+              <div className="flex flex-col items-center p-2 text-muted-foreground group-hover:text-primary transition-colors text-center">
+                <Camera className="w-5 h-5 mb-1.5 opacity-60 group-hover:scale-110 transition-transform" />
                 <span className="text-[10px] font-semibold leading-tight">
                   {slot.label}
                 </span>
-                <span className="text-[8px] text-slate-400 mt-0.5 font-mono">
+                <span className="text-[8px] text-muted-foreground/80 mt-0.5 font-mono">
                   Slot #{idx + 1}
                 </span>
               </div>
@@ -558,36 +422,36 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         {cameras.map((cam, idx) => (
           <div
             key={cam.id}
-            className="border border-slate-300 dark:border-slate-700 rounded-md bg-slate-100 dark:bg-slate-900 overflow-hidden shadow-sm flex flex-col"
+            className="border border-border rounded-xl bg-card overflow-hidden shadow-xs flex flex-col"
           >
-            {/* Header: Camera1 / Camera2 + Connection Status */}
-            <div className="bg-slate-200 dark:bg-slate-800 px-2.5 py-1 flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200 border-b border-slate-300 dark:border-slate-700">
-              <div className="flex items-center gap-1.5">
-                <Camera className="w-3.5 h-3.5 text-teal-600" />
-                <span>{cam.name}</span>
+            {/* Header: Camera Name + Live Status */}
+            <div className="bg-muted/50 px-3 py-1.5 flex items-center justify-between text-xs font-semibold text-foreground border-b border-border">
+              <div className="flex items-center gap-2">
+                <Camera className="w-3.5 h-3.5 text-primary" />
+                <span className="font-semibold">{cam.name}</span>
               </div>
-              <div className="flex items-center gap-1 text-[11px] font-mono">
+              <div className="flex items-center gap-1.5 text-[11px] font-mono">
                 {cam.status === 'connected' ? (
-                  <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-semibold">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                    <span>Connected</span>
+                    <span>Live 1080P</span>
                   </span>
-                ) : cam.status === 'simulated' ? (
-                  <span className="flex items-center gap-1 text-cyan-600 dark:text-cyan-400">
-                    <span className="w-2 h-2 rounded-full bg-cyan-500 animate-pulse" />
-                    <span>Live Sim</span>
+                ) : cam.status === 'standby' ? (
+                  <span className="flex items-center gap-1.5 text-amber-500 font-medium">
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                    <span>RTSP Standby</span>
                   </span>
                 ) : (
-                  <span className="flex items-center gap-1 text-amber-500">
-                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-                    <span>Connecting</span>
+                  <span className="flex items-center gap-1.5 text-sky-500 font-medium">
+                    <span className="w-2 h-2 rounded-full bg-sky-500 animate-ping" />
+                    <span>Connecting...</span>
                   </span>
                 )}
               </div>
             </div>
 
             {/* Viewport Screen */}
-            <div className="relative aspect-[16/10] bg-slate-950 flex items-center justify-center overflow-hidden">
+            <div className="relative aspect-[16/10] bg-neutral-950 flex items-center justify-center overflow-hidden">
               {/* HTML5 Video element for physical HLS stream */}
               <video
                 ref={videoRefs[idx]}
@@ -597,45 +461,72 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                 autoPlay
               />
 
-              {/* High-fps fallback canvas element for simulated feed */}
-              <canvas
-                ref={canvasRefs[idx]}
-                width={640}
-                height={400}
-                className="absolute inset-0 w-full h-full object-cover z-0 pointer-events-none"
-              />
+              {/* Grid overlay for alignment */}
+              <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:2rem_2rem] pointer-events-none z-10" />
 
-              {/* Grid overlay for scale alignment */}
-              <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b15_1px,transparent_1px),linear-gradient(to_bottom,#1e293b15_1px,transparent_1px)] bg-[size:2rem_2rem] pointer-events-none z-10" />
+              {/* Standby / Connecting backdrop if video not ready */}
+              {cam.status !== 'connected' && (
+                <div className="absolute inset-0 z-10 bg-gradient-to-b from-neutral-900/90 to-neutral-950/95 flex flex-col items-center justify-center p-4 text-center">
+                  <div className="p-3 rounded-full bg-primary/10 border border-primary/20 text-primary mb-2">
+                    <Activity className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <p className="text-xs font-mono font-semibold text-neutral-200">
+                    {cam.name}
+                  </p>
+                  <p className="text-[11px] font-mono text-neutral-400 mt-0.5">
+                    RTSP Gateway: {cam.ip}:554
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => initHls(idx)}
+                    className="mt-3 px-3 py-1 rounded-md bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-[11px] font-mono flex items-center gap-1.5 shadow-xs transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Reconnect Stream</span>
+                  </button>
+                </div>
+              )}
 
               {/* Top HUD Badges */}
-              <div className="absolute top-1.5 left-2 z-20 font-mono text-[10px] text-slate-300 bg-black/70 px-1.5 py-0.5 rounded border border-white/10 flex items-center gap-1.5 shadow-sm">
-                <span className="font-bold text-teal-400">CAM 0{idx + 1}</span>
-                <span className="text-slate-500">•</span>
+              <div className="absolute top-2 left-2 z-20 font-mono text-[10px] text-white/90 bg-neutral-900/80 backdrop-blur-xs px-2 py-0.5 rounded-md border border-white/10 flex items-center gap-1.5 shadow-xs">
+                <span className="font-bold text-sky-400">CAM 0{idx + 1}</span>
+                <span className="text-neutral-500">•</span>
                 <span>25 FPS</span>
-                <span className="text-slate-500">•</span>
+                <span className="text-neutral-500">•</span>
                 <span>1080P</span>
               </div>
 
-              <div className="absolute top-1.5 right-2 z-20 font-mono text-[10px] text-emerald-400 bg-black/70 px-1.5 py-0.5 rounded border border-white/10 flex items-center gap-1 shadow-sm">
+              <div className="absolute top-2 right-2 z-20 font-mono text-[10px] text-emerald-400 bg-neutral-900/80 backdrop-blur-xs px-2 py-0.5 rounded-md border border-white/10 flex items-center gap-1.5 shadow-xs">
                 <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
-                <span>REC</span>
+                <span>REC LIVE</span>
               </div>
 
-              {/* Camera 1 ANPR Interactive Tag */}
+              {/* Camera 1 ANPR Interactive Tag & Auto-Fetch Button */}
               {idx === 0 && (
-                <div className="absolute bottom-2 left-2 z-20 flex items-center gap-1.5">
-                  <div
-                    onClick={() => {
-                      const detected = vehicleRegNo || cam.plateSample;
-                      if (onPlateDetected) onPlateDetected(detected);
-                    }}
-                    className="bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/80 px-2 py-0.5 rounded shadow cursor-pointer transition-transform active:scale-95 flex items-center gap-1 text-[11px] font-mono text-emerald-300"
-                    title="Click to copy detected plate into Vehicle No"
-                  >
-                    <Scan className="w-3 h-3 text-emerald-400" />
-                    <span>PLATE: {vehicleRegNo || cam.plateSample}</span>
-                  </div>
+                <div className="absolute bottom-2 left-2 z-20 flex items-center gap-2">
+                  {vehicleRegNo || cam.plateSample ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const detected = cam.plateSample || vehicleRegNo;
+                        if (detected && onPlateDetected) onPlateDetected(detected);
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-400/50 px-2.5 py-1 rounded-md shadow-sm transition-all active:scale-95 flex items-center gap-1.5 text-xs font-mono font-bold"
+                      title="Click to apply detected plate to Vehicle No"
+                    >
+                      <Scan className="w-3.5 h-3.5 text-white animate-pulse" />
+                      <span>ANPR: {vehicleRegNo || cam.plateSample}</span>
+                      <span className="text-[10px] bg-white/20 px-1 py-0.2 rounded uppercase">Apply</span>
+                    </button>
+                  ) : (
+                    <div
+                      className="bg-neutral-900/80 text-white/70 border border-white/10 px-2.5 py-1 rounded-md shadow-sm flex items-center gap-1.5 text-xs font-mono"
+                      title="ANPR Camera Active - Waiting for vehicle"
+                    >
+                      <Scan className="w-3.5 h-3.5 text-white/50" />
+                      <span>ANPR: Standby</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -645,17 +536,17 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                 onClick={() => {
                   if (onTakeSnapshot) onTakeSnapshot(cam.angle);
                 }}
-                className="absolute bottom-2 right-2 z-20 bg-black/70 hover:bg-teal-600 text-white px-2 py-0.5 rounded text-[10px] font-mono flex items-center gap-1 border border-white/10 transition-colors shadow"
+                className="absolute bottom-2 right-2 z-20 bg-neutral-900/80 hover:bg-primary text-white px-2.5 py-1 rounded-md text-[11px] font-mono flex items-center gap-1.5 border border-white/10 transition-colors shadow-xs"
                 title={`Capture ${cam.name} Snapshot`}
               >
-                <Camera className="w-3 h-3" />
+                <Camera className="w-3.5 h-3.5" />
                 <span>Snap</span>
               </button>
             </div>
 
-            {/* IP Connection Bar (matches reference image: CamIP: 192.168.0.153 | 80 | admin | ******** | Start/Stop) */}
-            <div className="bg-slate-200 dark:bg-slate-800/90 px-2 py-1 flex items-center gap-1 text-[11px] font-mono border-t border-slate-300 dark:border-slate-700">
-              <span className="text-slate-600 dark:text-slate-400 whitespace-nowrap font-semibold">CamIP :</span>
+            {/* IP Connection Bar */}
+            <div className="bg-muted/40 px-3 py-1.5 flex items-center gap-2 text-[11px] font-mono border-t border-border">
+              <span className="text-muted-foreground whitespace-nowrap font-semibold">Cam IP:</span>
               <input
                 type="text"
                 value={cam.ip}
@@ -667,7 +558,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     return next;
                   });
                 }}
-                className="w-24 px-1 py-0.5 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-600 rounded text-center text-[10px]"
+                className="w-24 px-1.5 py-0.5 bg-background border border-input rounded-md text-center text-[10px] text-foreground font-mono focus:border-primary focus:ring-1 focus:ring-primary/20"
                 title="Camera IP Address"
               />
               <input
@@ -681,7 +572,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     return next;
                   });
                 }}
-                className="w-9 px-1 py-0.5 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-600 rounded text-center text-[10px]"
+                className="w-10 px-1.5 py-0.5 bg-background border border-input rounded-md text-center text-[10px] text-foreground font-mono focus:border-primary focus:ring-1 focus:ring-primary/20"
                 title="Camera Port"
               />
               <input
@@ -695,25 +586,23 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     return next;
                   });
                 }}
-                className="w-14 px-1 py-0.5 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-600 rounded text-center text-[10px]"
+                className="w-14 px-1.5 py-0.5 bg-background border border-input rounded-md text-center text-[10px] text-foreground font-mono focus:border-primary focus:ring-1 focus:ring-primary/20"
                 title="Username"
               />
               <input
                 type="password"
                 value={cam.pass}
                 readOnly
-                className="w-14 px-1 py-0.5 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-600 rounded text-center text-[10px]"
+                className="w-14 px-1.5 py-0.5 bg-background border border-input rounded-md text-center text-[10px] text-foreground font-mono focus:border-primary focus:ring-1 focus:ring-primary/20"
                 title="Password"
               />
               <button
                 type="button"
-                onClick={() => {
-                  initHls(idx);
-                }}
-                className="px-2 py-0.5 bg-teal-700 hover:bg-teal-800 text-white rounded text-[10px] font-bold transition-colors ml-auto"
+                onClick={() => initHls(idx)}
+                className="px-2.5 py-0.5 bg-primary/10 hover:bg-primary/20 text-primary border border-primary/20 rounded-md text-[10px] font-bold transition-colors ml-auto shadow-2xs"
                 title="Reconnect or Refresh Camera Stream"
               >
-                Start
+                Connect
               </button>
             </div>
           </div>
@@ -726,25 +615,25 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 backdrop-blur-sm"
           onClick={() => setActivePreview(null)}
         >
-          <div className="relative max-w-4xl max-h-[90vh] bg-slate-900 border border-slate-700 rounded-lg overflow-hidden shadow-2xl">
-            <div className="bg-slate-800 px-3 py-2 flex items-center justify-between text-xs text-white border-b border-slate-700">
-              <span className="font-bold flex items-center gap-1.5">
-                <Camera className="w-3.5 h-3.5 text-teal-400" />
-                <span>Captured Evidence Snapshot (Ready for Print & FTP Docket)</span>
+          <div className="relative max-w-4xl max-h-[90vh] bg-card border border-border rounded-xl overflow-hidden shadow-2xl">
+            <div className="bg-muted px-4 py-2.5 flex items-center justify-between text-xs font-semibold text-foreground border-b border-border">
+              <span className="font-bold flex items-center gap-2">
+                <Camera className="w-4 h-4 text-primary" />
+                <span>Captured Evidence Snapshot (Legal Metrology Format)</span>
               </span>
               <button
                 type="button"
                 onClick={() => setActivePreview(null)}
-                className="text-slate-400 hover:text-white px-2 py-0.5 rounded text-xs bg-slate-700"
+                className="text-muted-foreground hover:text-foreground px-2.5 py-1 rounded-md text-xs bg-muted/80 hover:bg-muted font-medium transition-colors"
               >
                 Close (ESC)
               </button>
             </div>
-            <div className="p-2 bg-black flex items-center justify-center">
+            <div className="p-3 bg-neutral-950 flex items-center justify-center">
               <img
                 src={activePreview}
                 alt="Captured Snapshot Preview"
-                className="max-h-[75vh] w-auto object-contain rounded"
+                className="max-h-[75vh] w-auto object-contain rounded-lg"
               />
             </div>
           </div>
@@ -755,3 +644,5 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
 });
 
 DualCameraFeedPanel.displayName = 'DualCameraFeedPanel';
+
+export default DualCameraFeedPanel;

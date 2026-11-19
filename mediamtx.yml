@@ -91,7 +91,7 @@ rtsp: yes
 # UDP-multicast allows to save bandwidth when clients are all in the same LAN.
 # TCP is the most versatile, and does support encryption.
 # The handshake is always performed with TCP.
-protocols: [udp, multicast, tcp]
+protocols: [tcp]
 # Encrypt handshakes and TCP streams with TLS (RTSPS).
 # Available values are "no", "strict", "optional".
 encryption: "no"
@@ -100,9 +100,9 @@ rtspAddress: :8554
 # Address of the TCP/TLS/RTSPS listener. This is needed only when encryption is "strict" or "optional".
 rtspsAddress: :8322
 # Address of the UDP/RTP listener. This is needed only when "udp" is in protocols.
-rtpAddress: :8000
+rtpAddress: :8100
 # Address of the UDP/RTCP listener. This is needed only when "udp" is in protocols.
-rtcpAddress: :8001
+rtcpAddress: :8101
 # IP range of all UDP-multicast listeners. This is needed only when "multicast" is in protocols.
 multicastIPRange: 224.1.0.0/16
 # Port of all UDP-multicast/RTP listeners. This is needed only when "multicast" is in protocols.
@@ -565,39 +565,44 @@ pathDefaults:
 # for example "~^(test1|test2)$" will match both "test1" and "test2",
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
-  # Camera 1 - ANPR Camera (192.168.0.101)
+  # Camera 1 - ANPR Camera (192.168.0.101) - Transcoded from H.265 to H.264 for universal browser playback
   cam1:
-    source: rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream
-    sourceProtocol: tcp
-    sourceOnDemand: yes
+    runOnInit: ffmpeg -hide_banner -loglevel error -rtsp_transport tcp -i rtsp://admin:Password@123@192.168.0.101:554/ch1/sub/av_stream -c:v libx264 -preset ultrafast -tune zerolatency -b:v 1500k -an -rtsp_transport tcp -f rtsp rtsp://127.0.0.1:8554/cam1
+    runOnInitRestart: yes
 
-  # Camera 2 - IP Camera (192.168.0.99)
+  # Camera 1 Direct RTSP (HEVC fallback)
+  cam1_raw:
+    source: rtsp://admin:Password@123@192.168.0.101:554/ch1/sub/av_stream
+    sourceProtocol: tcp
+    sourceOnDemand: no
+
+  # Camera 2 - IP Camera (192.168.0.99) - native H.264
   cam2:
     source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
     sourceProtocol: tcp
-    sourceOnDemand: yes
+    sourceOnDemand: no
 
   # Camera 3 - Exit / Rear Surveillance (192.168.0.99)
   cam3:
     source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
     sourceProtocol: tcp
-    sourceOnDemand: yes
+    sourceOnDemand: no
 
   # Alias paths
   anpr:
-    source: rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream
+    source: rtsp://127.0.0.1:8554/cam1
     sourceProtocol: tcp
-    sourceOnDemand: yes
+    sourceOnDemand: no
 
   ipcam:
     source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
     sourceProtocol: tcp
-    sourceOnDemand: yes
+    sourceOnDemand: no
 
   weighbridge:
     source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
     sourceProtocol: tcp
-    sourceOnDemand: yes
+    sourceOnDemand: no
 
   # Test stream (if needed)
   test:

@@ -13,6 +13,7 @@ import { Truck, User, MapPin, Package, Navigation, Settings, Loader2 } from "luc
 import { TripFormData } from "@/types/tripManagement";
 import { useVehicleManagement } from "@/hooks/useVehicleManagement";
 import { useDriverManagement } from "@/hooks/useDriverManagement";
+import { useToast } from "@/hooks/use-toast";
 
 interface TripFormDialogProps {
   open: boolean;
@@ -34,10 +35,12 @@ const materialOptions = [
 const TripFormDialog = ({ open, onOpenChange, onSubmit }: TripFormDialogProps) => {
   const { vehicles } = useVehicleManagement();
   const { drivers, getAvailableDrivers } = useDriverManagement();
+  const { toast } = useToast();
   
   const availableVehicles = vehicles.filter(v => v.status === 'available');
   const availableDrivers = getAvailableDrivers();
 
+  const [activeTab, setActiveTab] = useState("assignment");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formData, setFormData] = useState<Partial<TripFormData>>({
     origin: defaultOrigin,
@@ -47,17 +50,54 @@ const TripFormDialog = ({ open, onOpenChange, onSubmit }: TripFormDialogProps) =
     scheduledStartTime: new Date().toISOString().slice(0, 16),
   });
 
+  const selectedVehicle = vehicles.find(v => v.id === formData.vehicleId);
+  const selectedDriver = drivers.find(d => d.id === formData.driverId);
+
   const handleSubmit = async () => {
-    if (!formData.vehicleId || !formData.driverId || !formData.customerName || 
-        !formData.material || !formData.quantity || !formData.destination?.name) {
+    if (!formData.vehicleId) {
+      setActiveTab("assignment");
+      toast({ title: "Vehicle Required", description: "Please select an available vehicle.", variant: "destructive" });
       return;
     }
+    if (!formData.driverId) {
+      setActiveTab("assignment");
+      toast({ title: "Driver Required", description: "Please assign a driver.", variant: "destructive" });
+      return;
+    }
+    if (!formData.customerName?.trim()) {
+      setActiveTab("assignment");
+      toast({ title: "Customer Name Required", description: "Please enter the customer name.", variant: "destructive" });
+      return;
+    }
+    if (!formData.material) {
+      setActiveTab("cargo");
+      toast({ title: "Material Required", description: "Please select material type.", variant: "destructive" });
+      return;
+    }
+    if (!formData.quantity || Number(formData.quantity) <= 0) {
+      setActiveTab("cargo");
+      toast({ title: "Quantity Required", description: "Please enter a valid quantity.", variant: "destructive" });
+      return;
+    }
+
+    const resolvedDestination = (formData.destination?.name?.trim())
+      ? formData.destination
+      : {
+          name: `${formData.customerName.trim()} Site`,
+          address: formData.destination?.address?.trim() || `${formData.customerName.trim()} Delivery Address`,
+          latitude: formData.destination?.latitude || 19.0760,
+          longitude: formData.destination?.longitude || 72.8777,
+        };
+
+    const resolvedVehicleRegNo = selectedVehicle?.registrationNo || (selectedVehicle as any)?.registrationNumber || (selectedVehicle as any)?.vehicleNumber || 'MH12AB1234';
 
     setIsSubmitting(true);
     try {
       onSubmit({
         ...formData,
-        vehicleRegNo: (selectedVehicle as any)?.registrationNumber || (selectedVehicle as any)?.vehicleNumber || 'MH12AB1234',
+        destination: resolvedDestination,
+        estimatedDistance: formData.estimatedDistance || 25,
+        vehicleRegNo: resolvedVehicleRegNo,
         driverName: selectedDriver?.name || 'Assigned Driver',
         driverPhone: selectedDriver?.phone || '+91 98765 43210',
       } as TripFormData);
@@ -69,6 +109,7 @@ const TripFormDialog = ({ open, onOpenChange, onSubmit }: TripFormDialogProps) =
         enableGPS: true,
         scheduledStartTime: new Date().toISOString().slice(0, 16),
       });
+      setActiveTab("assignment");
     } finally {
       setIsSubmitting(false);
     }
@@ -77,9 +118,6 @@ const TripFormDialog = ({ open, onOpenChange, onSubmit }: TripFormDialogProps) =
   const updateField = <K extends keyof TripFormData>(field: K, value: TripFormData[K]) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
-
-  const selectedVehicle = vehicles.find(v => v.id === formData.vehicleId);
-  const selectedDriver = drivers.find(d => d.id === formData.driverId);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -95,7 +133,7 @@ const TripFormDialog = ({ open, onOpenChange, onSubmit }: TripFormDialogProps) =
         </DialogHeader>
 
         <ScrollArea className="max-h-[60vh]">
-          <Tabs defaultValue="assignment" className="w-full">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="assignment">Assignment</TabsTrigger>
               <TabsTrigger value="cargo">Cargo</TabsTrigger>

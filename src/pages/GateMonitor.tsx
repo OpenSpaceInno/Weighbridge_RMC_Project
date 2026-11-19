@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { LogIn, Activity, Loader2 } from "lucide-react";
+import { LogIn, Activity, Loader2, RefreshCw, CloudDownload, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -7,6 +7,7 @@ import { LiveFeedViewer } from "@/components/gate/LiveFeedViewer";
 import { SimplePlateDisplay } from "@/components/gate/SimplePlateDisplay";
 import { useGateCameras } from "@/hooks/useGateCameras";
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 
 const GateMonitor = () => {
   const { cameras, initialized } = useGateCameras();
@@ -20,6 +21,49 @@ const GateMonitor = () => {
 
   useEffect(() => {
     checkDatabaseTables();
+  }, []);
+
+  // Synchronize real ANPR events from FTP Camera Watcher & Backend
+  useEffect(() => {
+    let active = true;
+
+    const fetchLatestGate = async () => {
+      try {
+        const res = await api.getLatestGateVehicle();
+        if (!active) return;
+        if (res && res.success && res.vehicleRegNo) {
+          setDetectedPlate(res.vehicleRegNo);
+          setDetectedConfidence(res.confidence || 0.98);
+        }
+      } catch (err) {
+        // Silently catch
+      }
+    };
+
+    fetchLatestGate();
+    const interval = setInterval(fetchLatestGate, 3000);
+
+    // Cross-tab broadcast listener
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel('rmc_gate_sync');
+      channel.onmessage = (event) => {
+        if (!active) return;
+        if (event.data?.type === 'GATE_VEHICLE_DETECTED' && event.data.vehicleRegNo) {
+          setDetectedPlate(event.data.vehicleRegNo);
+          setDetectedConfidence(event.data.confidence || 0.98);
+        } else if (event.data?.type === 'GATE_VEHICLE_CLEARED') {
+          setDetectedPlate('');
+          setDetectedConfidence(0);
+        }
+      };
+    } catch (e) {}
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+      if (channel) channel.close();
+    };
   }, []);
 
   const checkDatabaseTables = async () => {
@@ -38,11 +82,88 @@ const GateMonitor = () => {
     window.location.href = '/database-setup';
   };
 
+  // Sync latest existing detection from FTP Camera
+  const handleSyncFtpNow = async () => {
+    try {
+      setIsProcessing(true);
+      const res = await api.syncFtpNow(true);
+      if (res && res.success && res.detection?.vehicleRegNo) {
+        const plate = res.detection.vehicleRegNo;
+        setDetectedPlate(plate);
+        setDetectedConfidence(0.98);
+        handlePlateDetected(plate, 0.98);
+        toast.success(`FTP Camera Synced: ${plate}`, {
+          description: `Real vehicle detected from FTP file ${res.detection.fileName || 'camera upload'}`,
+        });
+      } else {
+        toast.info("FTP Polled", {
+          description: "No new vehicle detection files found on FTP server.",
+        });
+      }
+    } catch (err: any) {
+      toast.error("FTP Sync Failed", {
+        description: err.message || "Could not connect to FTP server.",
+      });
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Clear current vehicle
+  const handleClearVehicle = async () => {
+    try {
+      await api.clearGateVehicle();
+      setDetectedPlate('');
+      setDetectedConfidence(0);
+      try {
+        localStorage.removeItem('rmc_gate_latest_vehicle');
+        const channel = new BroadcastChannel('rmc_gate_sync');
+        channel.postMessage({ type: 'GATE_VEHICLE_CLEARED' });
+        channel.close();
+      } catch (e) {}
+      toast.info("Vehicle cleared from Gate Monitor");
+    } catch (err) {}
+  };
+
   // Handle plate detection from live camera
   const handlePlateDetected = (plate: string, confidence: number) => {
     console.log('✅ Plate detected and displayed:', plate, 'Confidence:', confidence);
     setDetectedPlate(plate);
     setDetectedConfidence(confidence);
+
+    const cleanPlate = plate.replace(/\s+/g, '').toUpperCase();
+
+    // 1. Sync to localStorage for immediate cross-tab access
+    try {
+      localStorage.setItem('rmc_gate_latest_vehicle', JSON.stringify({
+        vehicleRegNo: cleanPlate,
+        confidence,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (e) {}
+
+    // 2. Post to backend API so Weighbridge can fetch from database
+    api.postLatestGateVehicle({
+      vehicleRegNo: cleanPlate,
+      confidence,
+      source: 'Gate Entry ANPR Camera (FTP)'
+    }).catch(err => console.warn('Could not post gate vehicle to backend:', err));
+
+    // 3. Broadcast real-time event to Weighbridge module
+    try {
+      const channel = new BroadcastChannel('rmc_gate_sync');
+      channel.postMessage({
+        type: 'GATE_VEHICLE_DETECTED',
+        vehicleRegNo: cleanPlate,
+        confidence,
+        timestamp: new Date().toISOString()
+      });
+      channel.close();
+    } catch (e) {}
+
+    window.dispatchEvent(new CustomEvent('rmc_gate_vehicle_detected', {
+      detail: { vehicleRegNo: cleanPlate, confidence }
+    }));
   };
 
   // Handle manual capture
@@ -134,7 +255,30 @@ const GateMonitor = () => {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          <Button 
+            variant="outline" 
+            size="sm" 
+            className="text-xs gap-1.5 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10"
+            onClick={handleSyncFtpNow}
+            disabled={isProcessing}
+            title="Fetch latest real ANPR detection from FTP server"
+          >
+            <CloudDownload className="h-3.5 w-3.5" />
+            Sync FTP Camera
+          </Button>
+          {detectedPlate && (
+            <Button 
+              variant="outline" 
+              size="sm" 
+              className="text-xs gap-1.5 text-muted-foreground hover:text-destructive hover:border-destructive/40"
+              onClick={handleClearVehicle}
+              title="Clear current vehicle from Gate Monitor"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Clear Vehicle
+            </Button>
+          )}
           <Button 
             variant="outline" 
             size="sm" 
@@ -209,7 +353,7 @@ const GateMonitor = () => {
               <LiveFeedViewer 
                 key={camera.id} 
                 camera={camera}
-                enableANPR={true}
+                enableANPR={camera.id === 'cam_gate_1'}
                 onPlateDetected={handlePlateDetected}
                 onRegisterCapture={registerManualCapture}
               />

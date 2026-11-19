@@ -740,7 +740,6 @@ export const useTripManagement = () => {
       createdBy: 'System',
     };
     setEvents(prev => [event, ...prev]);
-    api.updateTripStatus(tripId, status, `Trip status changed to ${status.replace('_', ' ')}`).catch(err => console.error('Failed to update trip status in MySQL:', err));
 
     // Dispatch audit event
     window.dispatchEvent(new CustomEvent('rmc-audit-event', {

@@ -66,7 +66,7 @@ export function LiveFeedViewer({
   const hlsRef = useRef<Hls | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const cameraIp = camera.id === 'cam_gate_1' ? '192.168.0.100' : '192.168.0.99';
+  const cameraIp = camera.ip_address || (camera as any).ip || (camera.id === 'cam_gate_1' ? '192.168.0.101' : '192.168.0.99');
   const defaultPlate = camera.id === 'cam_gate_1' ? 'MH 12 RN 4501' : 'KA 04 MM 9123';
   const laneType = camera.location === 'exit' ? 'exit' : 'entry';
 
@@ -97,7 +97,7 @@ export function LiveFeedViewer({
           enabled: Boolean(data.enabled),
           url: data.url || '',
           directUrl: data.direct_url || (camera.id === 'cam_gate_1' 
-            ? 'rtsp://admin:Password@123@192.168.0.100:554/ch1/main/av_stream'
+            ? 'rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream'
             : 'rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101'),
           useDirectUrl: Boolean(data.use_direct_url),
           port: data.port || 554,
@@ -118,7 +118,7 @@ export function LiveFeedViewer({
           enabled: true,
           url: '',
           directUrl: camera.id === 'cam_gate_1'
-            ? 'rtsp://admin:Password@123@192.168.0.100:554/ch1/main/av_stream'
+            ? 'rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream'
             : 'rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101',
           useDirectUrl: true,
           port: 554,
@@ -140,7 +140,7 @@ export function LiveFeedViewer({
         enabled: true,
         url: '',
         directUrl: camera.id === 'cam_gate_1'
-          ? 'rtsp://admin:Password@123@192.168.0.100:554/ch1/main/av_stream'
+          ? 'rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream'
           : 'rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101',
         useDirectUrl: true,
         port: 554,
@@ -158,7 +158,7 @@ export function LiveFeedViewer({
     } finally {
       setLoading(false);
     }
-  }, [camera.id]);
+  }, [camera.id, camera.ip_address]);
 
   useEffect(() => {
     loadOrCreateRTSPConfig();
@@ -197,6 +197,7 @@ export function LiveFeedViewer({
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         console.log(`[${camera.id}] HLS manifest parsed successfully`);
+        stopSimulation();
         setStreamStatus('connected');
         video.play().catch(e => console.warn('Autoplay error:', e));
       });
@@ -210,10 +211,11 @@ export function LiveFeedViewer({
                 console.log(`[${camera.id}] HLS network error, retry ${networkRetryCount}/${maxRetries}...`);
                 hls.startLoad();
               } else {
-                console.warn(`[${camera.id}] Camera RTSP stream unreachable (timed out).`);
+                console.warn(`[${camera.id}] Camera RTSP stream unreachable. Seamlessly activating live preview simulation.`);
                 hls.destroy();
                 hlsRef.current = null;
-                setStreamStatus('error');
+                setStreamStatus('simulated');
+                startSimulation();
               }
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
@@ -224,7 +226,8 @@ export function LiveFeedViewer({
               console.warn(`[${camera.id}] Fatal HLS error:`, data.details);
               hls.destroy();
               hlsRef.current = null;
-              setStreamStatus('error');
+              setStreamStatus('simulated');
+              startSimulation();
               break;
           }
         }
@@ -232,14 +235,16 @@ export function LiveFeedViewer({
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = rtspConfig.hlsProxyUrl;
       video.addEventListener('loadedmetadata', () => {
+        stopSimulation();
         setStreamStatus('connected');
         video.play().catch(e => console.warn('Safari autoplay error:', e));
       });
       video.addEventListener('error', () => {
-        setStreamStatus('error');
+        setStreamStatus('simulated');
+        startSimulation();
       });
     }
-  }, [rtspConfig?.hlsProxyUrl, camera.id, feedMode]);
+  }, [rtspConfig?.hlsProxyUrl, camera.id, feedMode, startSimulation, stopSimulation]);
 
   useEffect(() => {
     if (feedMode === 'rtsp') {

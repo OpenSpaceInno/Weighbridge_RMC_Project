@@ -177,16 +177,8 @@ export function LiveANPRDetector({
       paused: videoElement.paused,
     });
 
-    // Process frame every 2 seconds
-    processingIntervalRef.current = setInterval(() => {
-      processFrame();
-    }, 2000);
-
-    // Process first frame immediately
-    setTimeout(() => {
-      processFrame();
-    }, 1000);
-
+    // Frame capture is available on-demand via manual capture or slow monitoring
+    // We do not spam the API every 2s since hardware camera performs onboard ANPR to FTP
     return () => {
       if (processingIntervalRef.current) {
         clearInterval(processingIntervalRef.current);
@@ -224,7 +216,7 @@ export function LiveANPRDetector({
                 </div>
               )}
               <div className="text-xs text-white/60">
-                {detectionCount} detected
+                {detectionCount > 0 ? `${detectionCount} detected` : 'Waiting for vehicle'}
               </div>
             </div>
             <Badge variant="outline" className="ml-2 bg-success/20 text-success border-success/50">

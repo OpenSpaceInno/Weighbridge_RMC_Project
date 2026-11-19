@@ -33,15 +33,36 @@ const assignmentStatusConfig = {
   cancelled: { label: 'Cancelled', className: 'bg-red-500/10 text-red-600' },
 };
 
+const safeFormatDate = (dateVal: any, fmt: string, fallback = '—') => {
+  if (!dateVal) return fallback;
+  try {
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return fallback;
+    return format(d, fmt);
+  } catch (e) {
+    return fallback;
+  }
+};
+
 export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }: DriverDetailsDialogProps) {
   if (!driver) return null;
 
-  const statusInfo = statusConfig[driver.status];
-  const daysUntilExpiry = differenceInDays(new Date(driver.license.expiryDate), new Date());
-  const completedTrips = assignments.filter(a => a.status === 'completed');
+  const statusInfo = statusConfig[driver.status] || statusConfig.available;
+  let daysUntilExpiry = 999;
+  if (driver.license?.expiryDate) {
+    try {
+      const expD = new Date(driver.license.expiryDate);
+      if (!isNaN(expD.getTime())) {
+        daysUntilExpiry = differenceInDays(expD, new Date());
+      }
+    } catch (e) {}
+  }
+  const completedTrips = (assignments || []).filter(a => a.status === 'completed');
   const avgRating = completedTrips.length > 0 
-    ? completedTrips.reduce((sum, a) => sum + (a.rating || 0), 0) / completedTrips.filter(a => a.rating).length
-    : 0;
+    ? completedTrips.reduce((sum, a) => sum + (a.rating || 0), 0) / (completedTrips.filter(a => a.rating).length || 1)
+    : (driver.rating || 5);
+
+  const licenseStatus = driver.license?.status || (daysUntilExpiry <= 30 && daysUntilExpiry >= 0 ? 'expiring_soon' : 'valid');
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -67,17 +88,17 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                 <User className="h-10 w-10 text-primary" />
               </div>
               <div className="flex-1">
-                <h2 className="text-2xl font-bold text-foreground">{driver.name}</h2>
-                <p className="text-muted-foreground">{driver.employeeId}</p>
+                <h2 className="text-2xl font-bold text-foreground">{driver.name || 'Unnamed Driver'}</h2>
+                <p className="text-muted-foreground">{driver.employeeId || 'ID Pending'}</p>
                 <div className="flex items-center gap-4 mt-2">
                   <div className="flex items-center gap-1">
                     <Star className="h-4 w-4 text-amber-500 fill-amber-500" />
-                    <span className="font-semibold">{driver.rating.toFixed(1)}</span>
+                    <span className="font-semibold">{(driver.rating || 5).toFixed(1)}</span>
                   </div>
                   <span className="text-muted-foreground">•</span>
-                  <span className="text-sm text-muted-foreground">{driver.totalTrips} trips</span>
+                  <span className="text-sm text-muted-foreground">{driver.totalTrips || 0} trips</span>
                   <span className="text-muted-foreground">•</span>
-                  <span className="text-sm text-muted-foreground">{(driver.totalDistance / 1000).toFixed(1)}k km</span>
+                  <span className="text-sm text-muted-foreground">{((driver.totalDistance || 0) / 1000).toFixed(1)}k km</span>
                 </div>
               </div>
             </div>
@@ -86,19 +107,19 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
             <div className="grid grid-cols-4 gap-4">
               <Card>
                 <CardContent className="pt-4">
-                  <div className="text-2xl font-bold text-foreground">{driver.totalTrips}</div>
+                  <div className="text-2xl font-bold text-foreground">{driver.totalTrips || 0}</div>
                   <p className="text-xs text-muted-foreground">Total Trips</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4">
-                  <div className="text-2xl font-bold text-foreground">{(driver.totalDistance / 1000).toFixed(1)}k</div>
+                  <div className="text-2xl font-bold text-foreground">{((driver.totalDistance || 0) / 1000).toFixed(1)}k</div>
                   <p className="text-xs text-muted-foreground">Km Driven</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-4">
-                  <div className="text-2xl font-bold text-foreground">{driver.rating.toFixed(1)}</div>
+                  <div className="text-2xl font-bold text-foreground">{(driver.rating || 5).toFixed(1)}</div>
                   <p className="text-xs text-muted-foreground">Avg Rating</p>
                 </CardContent>
               </Card>
@@ -121,15 +142,15 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                 <CardContent className="space-y-3">
                   <div className="flex items-center gap-3">
                     <Phone className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{driver.phone}</span>
+                    <span className="text-sm">{driver.phone || '—'}</span>
                   </div>
                   <div className="flex items-center gap-3">
                     <Mail className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{driver.email}</span>
+                    <span className="text-sm">{driver.email || '—'}</span>
                   </div>
                   <div className="flex items-start gap-3">
                     <MapPin className="h-4 w-4 text-muted-foreground mt-0.5" />
-                    <span className="text-sm">{driver.address}</span>
+                    <span className="text-sm">{driver.address || '—'}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -141,15 +162,15 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                 <CardContent className="space-y-3">
                   <div className="flex items-center gap-3">
                     <User className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{driver.emergencyContact.name}</span>
+                    <span className="text-sm">{driver.emergencyContact?.name || '—'}</span>
                   </div>
                   <div className="flex items-center gap-3">
                     <Shield className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{driver.emergencyContact.relation}</span>
+                    <span className="text-sm">{driver.emergencyContact?.relation || '—'}</span>
                   </div>
                   <div className="flex items-center gap-3">
                     <Phone className="h-4 w-4 text-muted-foreground" />
-                    <span className="text-sm">{driver.emergencyContact.phone}</span>
+                    <span className="text-sm">{driver.emergencyContact?.phone || '—'}</span>
                   </div>
                 </CardContent>
               </Card>
@@ -164,11 +185,11 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                 <div className="grid grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Date of Birth</p>
-                    <p className="text-sm font-medium">{format(new Date(driver.dateOfBirth), 'dd MMM yyyy')}</p>
+                    <p className="text-sm font-medium">{safeFormatDate(driver.dateOfBirth, 'dd MMM yyyy')}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Date of Joining</p>
-                    <p className="text-sm font-medium">{format(new Date(driver.dateOfJoining), 'dd MMM yyyy')}</p>
+                    <p className="text-sm font-medium">{safeFormatDate(driver.dateOfJoining, 'dd MMM yyyy')}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Assigned Vehicle</p>
@@ -197,10 +218,10 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                     Driving License
                   </CardTitle>
                   <Badge 
-                    variant={driver.license.status === 'valid' ? 'default' : 'destructive'}
-                    className={driver.license.status === 'valid' ? 'bg-green-500' : driver.license.status === 'expiring_soon' ? 'bg-amber-500' : ''}
+                    variant={licenseStatus === 'valid' ? 'default' : 'destructive'}
+                    className={licenseStatus === 'valid' ? 'bg-green-500' : licenseStatus === 'expiring_soon' ? 'bg-amber-500' : ''}
                   >
-                    {driver.license.status === 'expiring_soon' ? `Expires in ${daysUntilExpiry} days` : driver.license.status.toUpperCase()}
+                    {licenseStatus === 'expiring_soon' ? `Expires in ${daysUntilExpiry > 0 ? `${daysUntilExpiry} days` : 'today'}` : licenseStatus.toUpperCase()}
                   </Badge>
                 </div>
               </CardHeader>
@@ -208,26 +229,26 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">License Number</p>
-                    <p className="text-sm font-mono font-medium">{driver.license.number}</p>
+                    <p className="text-sm font-mono font-medium">{driver.license?.number || '—'}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">License Type</p>
-                    <p className="text-sm font-medium">{driver.license.type}</p>
+                    <p className="text-sm font-medium">{driver.license?.type || 'HMV'}</p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-3 gap-4">
                   <div>
                     <p className="text-xs text-muted-foreground">Issue Date</p>
-                    <p className="text-sm font-medium">{format(new Date(driver.license.issueDate), 'dd MMM yyyy')}</p>
+                    <p className="text-sm font-medium">{safeFormatDate(driver.license?.issueDate, 'dd MMM yyyy')}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Expiry Date</p>
-                    <p className="text-sm font-medium">{format(new Date(driver.license.expiryDate), 'dd MMM yyyy')}</p>
+                    <p className="text-sm font-medium">{safeFormatDate(driver.license?.expiryDate, 'dd MMM yyyy')}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Issuing Authority</p>
-                    <p className="text-sm font-medium">{driver.license.issuingAuthority}</p>
+                    <p className="text-sm font-medium">{driver.license?.issuingAuthority || '—'}</p>
                   </div>
                 </div>
 
@@ -245,7 +266,7 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                   />
                 </div>
 
-                {driver.license.endorsements.length > 0 && (
+                {Array.isArray(driver.license?.endorsements) && driver.license.endorsements.length > 0 && (
                   <div>
                     <p className="text-xs text-muted-foreground mb-2">Endorsements</p>
                     <div className="flex flex-wrap gap-2">
@@ -301,7 +322,7 @@ export function DriverDetailsDialog({ open, onOpenChange, driver, assignments }:
                             </div>
                             <div className="flex items-center gap-1">
                               <Calendar className="h-3 w-3 text-muted-foreground" />
-                              <span>{format(new Date(assignment.assignedAt), 'dd MMM yyyy')}</span>
+                              <span>{safeFormatDate(assignment.assignedAt, 'dd MMM yyyy')}</span>
                             </div>
                           </div>
 

@@ -54,16 +54,35 @@ const DriverManagement = () => {
   const stats = getStats();
 
   const filteredDrivers = drivers.filter(driver => {
+    const q = searchQuery.toLowerCase().trim();
+    const name = driver.name || '';
+    const empId = driver.employeeId || '';
+    const phone = driver.phone || '';
+
     const matchesSearch = 
-      driver.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      driver.employeeId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      driver.phone.includes(searchQuery);
+      !q ||
+      name.toLowerCase().includes(q) ||
+      empId.toLowerCase().includes(q) ||
+      phone.includes(q);
 
     if (activeTab === "all") return matchesSearch;
     if (activeTab === "available") return matchesSearch && driver.status === 'available';
     if (activeTab === "on_trip") return matchesSearch && driver.status === 'on_trip';
     if (activeTab === "on_leave") return matchesSearch && driver.status === 'on_leave';
-    if (activeTab === "expiring") return matchesSearch && driver.license.status === 'expiring_soon';
+    if (activeTab === "expiring") {
+      let isExpiring = driver.license?.status === 'expiring_soon' || driver.license?.status === 'expired';
+      if (!isExpiring && driver.license?.expiryDate) {
+        try {
+          const expD = new Date(driver.license.expiryDate);
+          if (!isNaN(expD.getTime())) {
+            const now = new Date();
+            const thirtyDays = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+            if (expD <= thirtyDays) isExpiring = true;
+          }
+        } catch (e) {}
+      }
+      return matchesSearch && isExpiring;
+    }
     return matchesSearch;
   });
 
@@ -163,7 +182,7 @@ const DriverManagement = () => {
 
       {/* Stats Cards */}
       <div className="grid grid-cols-5 gap-4">
-        <Card>
+        <Card className={`cursor-pointer transition-colors hover:border-primary ${activeTab === 'all' ? 'border-primary' : ''}`} onClick={() => setActiveTab('all')}>
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>
@@ -174,7 +193,7 @@ const DriverManagement = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className={`cursor-pointer transition-colors hover:border-primary ${activeTab === 'available' ? 'border-primary' : ''}`} onClick={() => setActiveTab('available')}>
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>
@@ -185,7 +204,7 @@ const DriverManagement = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className={`cursor-pointer transition-colors hover:border-primary ${activeTab === 'on_trip' ? 'border-primary' : ''}`} onClick={() => setActiveTab('on_trip')}>
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>
@@ -196,7 +215,7 @@ const DriverManagement = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className={`cursor-pointer transition-colors hover:border-primary ${activeTab === 'on_leave' ? 'border-primary' : ''}`} onClick={() => setActiveTab('on_leave')}>
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>
@@ -207,7 +226,7 @@ const DriverManagement = () => {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card className={`cursor-pointer transition-colors hover:border-primary ${activeTab === 'expiring' ? 'border-primary' : ''}`} onClick={() => setActiveTab('expiring')}>
           <CardContent className="pt-4">
             <div className="flex items-center justify-between">
               <div>

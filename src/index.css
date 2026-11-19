@@ -18,6 +18,17 @@ All colors MUST be HSL.
 */
 
 @layer base {
+  /* Remove native up/down number input spin buttons across the application */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   :root {
     --background: 210 40% 98%;
     --foreground: 215 25% 15%;
@@ -143,5 +154,17 @@ All colors MUST be HSL.
 
   body {
     @apply bg-background text-foreground;
+  }
+
+  /* Remove upward and downward stepper arrows from number inputs across all browsers */
+  input::-webkit-outer-spin-button,
+  input::-webkit-inner-spin-button {
+    -webkit-appearance: none !important;
+    margin: 0 !important;
+  }
+
+  input[type="number"] {
+    -moz-appearance: textfield !important;
+    appearance: textfield !important;
   }
 }

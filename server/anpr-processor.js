@@ -17,8 +17,8 @@ class ANPRProcessor {
       cloudUrl: 'https://api.platerecognizer.com/v1/plate-reader/',
       apiKey: process.env.PLATERECOGNIZER_API_KEY || '', // Get free key from platerecognizer.com
       
-      // Option 3: Mock mode for testing
-      mockEnabled: !process.env.PLATERECOGNIZER_API_KEY,
+      // Option 3: Mock mode strictly disabled
+      mockEnabled: false,
       
       // Detection settings
       minConfidence: 0.7,
@@ -46,7 +46,12 @@ class ANPRProcessor {
         return await this.localDetection(imageData);
       }
 
-      throw new Error('No ANPR service configured');
+      // If no external ANPR API key configured, do not hallucinate or mock
+      return {
+        success: true,
+        plates: [],
+        message: 'No external ANPR cloud service configured; onboard camera/FTP ANPR active'
+      };
     } catch (error) {
       console.error('ANPR detection error:', error.message);
       return {
@@ -134,34 +139,14 @@ class ANPRProcessor {
   }
 
   /**
-   * Mock detection for testing without API
+   * Mock detection disabled - returns empty
    */
   mockDetection(cameraId) {
-    const mockPlates = [
-      'KA05AB1234',
-      'MH02CD5678',
-      'DL01EF9012',
-      'TN09GH3456',
-      'GJ06IJ7890',
-    ];
-
-    const plate = mockPlates[Math.floor(Math.random() * mockPlates.length)];
-    const confidence = 0.85 + Math.random() * 0.14; // 85-99%
-
     return {
       success: true,
-      plates: [{
-        plate: plate,
-        confidence: confidence,
-        region: 'in',
-        bbox: { x: 100, y: 100, width: 200, height: 50 },
-        vehicle: {
-          type: Math.random() > 0.5 ? 'Truck' : 'Car',
-        },
-      }],
-      processingTime: 0.15,
+      plates: [],
       timestamp: new Date().toISOString(),
-      mock: true,
+      mock: false,
     };
   }
 

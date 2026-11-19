@@ -188,7 +188,7 @@ export const useVehicleManagement = () => {
   });
 
   const [isLoading, setIsLoading] = useState(false);
-  const [filter, setFilter] = useState<Vehicle['status'] | 'all'>('all');
+  const [filter, setFilter] = useState<Vehicle['status'] | 'all' | 'expiring_docs'>('all');
 
   // Persistence helper
   const persistVehicles = useCallback((newVehicles: Vehicle[]) => {
@@ -278,15 +278,25 @@ export const useVehicleManagement = () => {
       const now = new Date();
       const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
       return (
-        new Date(v.insuranceExpiry) <= thirtyDaysFromNow ||
-        new Date(v.fitnessExpiry) <= thirtyDaysFromNow ||
-        new Date(v.permitExpiry) <= thirtyDaysFromNow
+        (v.insuranceExpiry && new Date(v.insuranceExpiry) <= thirtyDaysFromNow) ||
+        (v.fitnessExpiry && new Date(v.fitnessExpiry) <= thirtyDaysFromNow) ||
+        (v.permitExpiry && new Date(v.permitExpiry) <= thirtyDaysFromNow)
       );
     }).length,
   };
 
   const filteredVehicles = filter === 'all' 
     ? vehicles 
+    : filter === 'expiring_docs'
+    ? vehicles.filter(v => {
+        const now = new Date();
+        const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        return (
+          (v.insuranceExpiry && new Date(v.insuranceExpiry) <= thirtyDaysFromNow) ||
+          (v.fitnessExpiry && new Date(v.fitnessExpiry) <= thirtyDaysFromNow) ||
+          (v.permitExpiry && new Date(v.permitExpiry) <= thirtyDaysFromNow)
+        );
+      })
     : vehicles.filter(v => v.status === filter);
 
   const addVehicle = useCallback((vehicleData: Omit<Vehicle, 'id' | 'createdAt' | 'updatedAt'>) => {

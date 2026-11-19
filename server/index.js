@@ -4,11 +4,17 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { spawn } from 'child_process';
 import * as ftp from 'basic-ftp';
 import { pool, testConnection, initializeDatabase } from './db.js';
 import anprProcessor from './anpr-processor.js';
+import ftpAnprWatcher from './ftp-anpr-watcher.js';
+import cloudSyncService from './cloud-sync-service.js';
+import syncRouter from './routes/sync.js';
 import multer from 'multer';
 import net from 'net';
+import http from 'http';
+import { SerialPort } from 'serialport';
 
 dotenv.config();
 
@@ -81,6 +87,28 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '50mb' })); // Increase limit for image uploads
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/snapshots', express.static(snapshotsDir));
+app.use('/api/sync', syncRouter);
+
+// Proxy /hls requests to MediaMTX HLS Gateway on port 8888
+app.use('/hls', (req, res) => {
+  const options = {
+    hostname: '127.0.0.1',
+    port: 8888,
+    path: req.url,
+    method: req.method,
+    headers: { ...req.headers, host: '127.0.0.1:8888' },
+  };
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res, { end: true });
+  });
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'MediaMTX stream gateway offline', detail: err.message });
+    }
+  });
+  req.pipe(proxyReq, { end: true });
+});
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -610,6 +638,229 @@ app.post('/api/anpr/webhook/:cameraId', async (req, res) => {
   }
 });
 
+// ==========================================
+// GATE MONITOR -> WEIGHBRIDGE VEHICLE SYNC API
+// ==========================================
+
+let latestGateVehicleCache = null;
+let gateVehicleClearedAt = 0;
+
+// GET /api/gate/latest-vehicle
+app.get('/api/gate/latest-vehicle', async (req, res) => {
+  try {
+    // 1. Check active real-time detection from FTP Watcher
+    const ftpLatest = ftpAnprWatcher.getLatestDetection();
+    if (ftpLatest && ftpLatest.vehicleRegNo) {
+      return res.json(ftpLatest);
+    }
+
+    // 2. Check in-memory gate cache if manually updated
+    if (latestGateVehicleCache && latestGateVehicleCache.vehicleRegNo) {
+      return res.json({
+        success: true,
+        ...latestGateVehicleCache
+      });
+    }
+
+    // If gate vehicle was explicitly cleared, do not return older historical DB rows
+    if (gateVehicleClearedAt > 0) {
+      return res.json({ success: false, message: 'No vehicle currently at gate' });
+    }
+
+    // 3. Query only recent detections from anpr_events (within last 30 minutes)
+    const [rows] = await pool.query(`
+      SELECT 
+        e.*,
+        v.id AS vehicle_id,
+        v.make AS vehicle_make,
+        v.model AS vehicle_model,
+        v.current_driver AS vehicle_driver,
+        v.current_driver_phone AS vehicle_driver_phone,
+        v.status AS vehicle_status
+      FROM anpr_events e
+      LEFT JOIN vehicles v ON (
+        REPLACE(UPPER(e.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', '')
+      )
+      WHERE e.vehicle_reg_no NOT IN ('KA05AB1234', 'MH02CD5678', 'DL01EF9012', 'TN09GH3456', 'GJ06IJ7890')
+        AND e.timestamp >= NOW() - INTERVAL 30 MINUTE
+      ORDER BY e.timestamp DESC
+      LIMIT 1
+    `);
+
+    if (rows.length > 0) {
+      const row = rows[0];
+      const [tripRows] = await pool.query(`
+        SELECT customer_name, material, driver_name 
+        FROM trips 
+        WHERE REPLACE(UPPER(vehicle_reg_no), ' ', '') = REPLACE(UPPER(?), ' ', '')
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `, [row.vehicle_reg_no]);
+
+      const trip = tripRows.length > 0 ? tripRows[0] : null;
+
+      return res.json({
+        success: true,
+        vehicleRegNo: row.vehicle_reg_no,
+        confidence: parseFloat(row.confidence || 0.98),
+        source: row.source || 'Entry Gate ANPR Camera (FTP)',
+        timestamp: row.timestamp,
+        cameraId: row.camera_id,
+        matchedVehicle: {
+          make: row.vehicle_make,
+          model: row.vehicle_model,
+          driverName: row.vehicle_driver || trip?.driver_name,
+          partyName: trip?.customer_name,
+          product: trip?.material
+        }
+      });
+    }
+
+    // If no vehicle is at the gate, report clean state (strictly no mock or stale session fallback)
+    res.json({ success: false, message: 'No vehicle currently at gate' });
+  } catch (error) {
+    console.error('Get latest gate vehicle error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/gate/clear-vehicle (Clear gate vehicle state on transaction save/reset)
+app.post('/api/gate/clear-vehicle', (req, res) => {
+  latestGateVehicleCache = null;
+  gateVehicleClearedAt = Date.now();
+  ftpAnprWatcher.clearLatestDetection();
+  res.json({ success: true, message: 'Gate vehicle state cleared' });
+});
+
+// GET /api/gate/ftp-status (Check FTP ANPR poller health and metrics)
+app.get('/api/gate/ftp-status', (req, res) => {
+  res.json({ success: true, ...ftpAnprWatcher.getStatus() });
+});
+
+// POST /api/gate/ftp-sync-now (Manual or immediate FTP trigger)
+app.post('/api/gate/ftp-sync-now', async (req, res) => {
+  try {
+    const { loadLatestExisting = false } = req.body || {};
+    gateVehicleClearedAt = 0; // reset cleared flag on manual sync
+    let result;
+    if (loadLatestExisting) {
+      result = await ftpAnprWatcher.syncLatestExisting();
+    } else {
+      await ftpAnprWatcher.poll(false);
+      result = ftpAnprWatcher.getLatestDetection();
+    }
+    res.json({ success: true, detection: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/gate/latest-vehicle (Pushed by Gate Monitor when camera detects a plate)
+app.post('/api/gate/latest-vehicle', async (req, res) => {
+  try {
+    const { vehicleRegNo, confidence = 0.95, source = 'Gate Entry ANPR Camera', cameraId = 'cam_gate_1' } = req.body;
+    if (!vehicleRegNo) {
+      return res.status(400).json({ error: 'vehicleRegNo is required' });
+    }
+
+    const cleanPlate = vehicleRegNo.replace(/\s+/g, '').toUpperCase();
+    const event_id = `evt_GATE_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+    try {
+      await pool.query(
+        `INSERT INTO anpr_events 
+         (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, timestamp)
+         VALUES (?, 'plant_001', ?, ?, ?, ?, 'confirmed', NOW())`,
+        [event_id, cameraId, cleanPlate, confidence, source]
+      );
+    } catch (dbErr) {
+      console.warn('Could not insert to anpr_events, keeping in cache:', dbErr.message);
+    }
+
+    const [vehRows] = await pool.query(
+      `SELECT v.make, v.model, v.current_driver, t.customer_name, t.material 
+       FROM vehicles v
+       LEFT JOIN trips t ON (REPLACE(UPPER(t.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', ''))
+       WHERE REPLACE(UPPER(v.registration_no), ' ', '') = ?
+       LIMIT 1`,
+      [cleanPlate]
+    );
+
+    const matched = vehRows.length > 0 ? vehRows[0] : null;
+
+    latestGateVehicleCache = {
+      vehicleRegNo: cleanPlate,
+      confidence,
+      source,
+      timestamp: new Date().toISOString(),
+      matchedVehicle: matched ? {
+        make: matched.make,
+        model: matched.model,
+        driverName: matched.current_driver,
+        partyName: matched.customer_name,
+        product: matched.material
+      } : undefined
+    };
+
+    res.json({
+      success: true,
+      vehicleRegNo: cleanPlate,
+      matchedVehicle: latestGateVehicleCache.matchedVehicle,
+      message: 'Latest gate vehicle updated'
+    });
+  } catch (error) {
+    console.error('Post latest gate vehicle error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/gate/recent-vehicles (Last 10 vehicles detected at Gate)
+app.get('/api/gate/recent-vehicles', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT 
+        e.id,
+        e.event_id,
+        e.vehicle_reg_no,
+        e.confidence,
+        e.source,
+        e.camera_id,
+        e.timestamp,
+        v.make AS vehicle_make,
+        v.model AS vehicle_model,
+        v.current_driver AS vehicle_driver,
+        t.customer_name,
+        t.material
+      FROM anpr_events e
+      LEFT JOIN vehicles v ON (
+        REPLACE(UPPER(e.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', '')
+      )
+      LEFT JOIN trips t ON (
+        REPLACE(UPPER(e.vehicle_reg_no), ' ', '') = REPLACE(UPPER(t.vehicle_reg_no), ' ', '')
+      )
+      ORDER BY e.timestamp DESC
+      LIMIT 10
+    `);
+
+    res.json({
+      success: true,
+      count: rows.length,
+      vehicles: rows.map(r => ({
+        id: r.id,
+        vehicleRegNo: r.vehicle_reg_no,
+        confidence: parseFloat(r.confidence || 0.95),
+        source: r.source,
+        timestamp: r.timestamp,
+        partyName: r.customer_name || '',
+        product: r.material || '',
+        driverName: r.vehicle_driver || ''
+      }))
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // ==========================================
 // VEHICLES & DRIVERS API (Phase 1)
@@ -646,17 +897,38 @@ function formatDriver(d) {
   if (!d) return null;
   let emergencyContact = { name: '', relation: '', phone: '' };
   try {
-    emergencyContact = typeof d.emergency_contact === 'string'
+    const parsed = typeof d.emergency_contact === 'string'
       ? JSON.parse(d.emergency_contact)
-      : (d.emergency_contact || emergencyContact);
+      : (d.emergency_contact || {});
+    emergencyContact = {
+      name: parsed?.name || '',
+      relation: parsed?.relation || '',
+      phone: parsed?.phone || ''
+    };
   } catch (e) {}
 
   let license = { number: '', type: 'HMV', issueDate: '', expiryDate: '', issuingAuthority: '', endorsements: [], status: 'valid' };
   try {
-    license = typeof d.license === 'string'
+    const parsed = typeof d.license === 'string'
       ? JSON.parse(d.license)
-      : (d.license || license);
+      : (d.license || {});
+    license = {
+      ...license,
+      ...parsed,
+      endorsements: Array.isArray(parsed?.endorsements) ? parsed.endorsements : [],
+    };
   } catch (e) {}
+
+  if (license.expiryDate) {
+    const expDate = new Date(license.expiryDate);
+    const now = new Date();
+    const daysLeft = Math.ceil((expDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    if (daysLeft < 0) {
+      license.status = 'expired';
+    } else if (daysLeft <= 30) {
+      license.status = 'expiring_soon';
+    }
+  }
 
   return {
     id: d.id,
@@ -939,6 +1211,88 @@ app.delete('/api/drivers/:id', async (req, res) => {
 // WEIGHBRIDGE API (Phase 2)
 // ==========================================
 
+function safeIsoDate(val, fallback = null) {
+  if (!val) return fallback;
+  try {
+    if (val instanceof Date) {
+      return isNaN(val.getTime()) ? fallback : val.toISOString();
+    }
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) {
+      return d.toISOString();
+    }
+    if (typeof val === 'string') {
+      const match = val.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+      if (match) {
+        const day = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const year = parseInt(match[3], 10);
+        const hour = match[4] ? parseInt(match[4], 10) : 0;
+        const minute = match[5] ? parseInt(match[5], 10) : 0;
+        const second = match[6] ? parseInt(match[6], 10) : 0;
+        const parsed = new Date(year, month, day, hour, minute, second);
+        if (!isNaN(parsed.getTime())) return parsed.toISOString();
+      }
+    }
+  } catch (e) {}
+  return fallback;
+}
+
+function safeDatePart(val, fallback = '') {
+  if (!val) return fallback;
+  try {
+    if (typeof val === 'string') {
+      const m = val.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (m) return m[1];
+      const mDmy = val.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+      if (mDmy) return `${mDmy[3]}-${mDmy[2].padStart(2, '0')}-${mDmy[1].padStart(2, '0')}`;
+    }
+    const iso = safeIsoDate(val);
+    return iso ? iso.split('T')[0] : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function safeTimePart(val, fallback = '') {
+  if (!val) return fallback;
+  try {
+    if (typeof val === 'string' && val.match(/^\d{1,2}:\d{2}(?::\d{2})?$/)) {
+      return val;
+    }
+    const iso = safeIsoDate(val);
+    if (iso) {
+      return new Date(iso).toTimeString().split(' ')[0];
+    }
+  } catch (e) {}
+  return fallback;
+}
+
+function toValidDateOrNull(val) {
+  if (!val) return null;
+  try {
+    if (val instanceof Date) {
+      return isNaN(val.getTime()) ? null : val;
+    }
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) return d;
+    if (typeof val === 'string') {
+      const match = val.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?/);
+      if (match) {
+        const day = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const year = parseInt(match[3], 10);
+        const hour = match[4] ? parseInt(match[4], 10) : 0;
+        const minute = match[5] ? parseInt(match[5], 10) : 0;
+        const second = match[6] ? parseInt(match[6], 10) : 0;
+        const parsed = new Date(year, month, day, hour, minute, second);
+        if (!isNaN(parsed.getTime())) return parsed;
+      }
+    }
+  } catch (e) {}
+  return null;
+}
+
 function formatWeighbridgeSession(row) {
   if (!row) return null;
   let evidence = [];
@@ -961,11 +1315,11 @@ function formatWeighbridgeSession(row) {
     partyName: row.party_name || '',
     firmName: row.firm_name || '',
     product: row.material || '',
-    timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
+    timestamp: safeIsoDate(row.timestamp, new Date().toISOString()),
     firstWeight: row.first_weight !== null && row.first_weight !== undefined ? parseFloat(row.first_weight) : (row.tare_weight !== null ? parseFloat(row.tare_weight) : null),
-    firstWeightTime: row.first_weight_time ? new Date(row.first_weight_time).toISOString() : (row.timestamp ? new Date(row.timestamp).toISOString() : null),
+    firstWeightTime: safeIsoDate(row.first_weight_time, safeIsoDate(row.timestamp, null)),
     secondWeight: row.second_weight !== null && row.second_weight !== undefined ? parseFloat(row.second_weight) : (row.gross_weight !== null ? parseFloat(row.gross_weight) : null),
-    secondWeightTime: row.second_weight_time ? new Date(row.second_weight_time).toISOString() : null,
+    secondWeightTime: safeIsoDate(row.second_weight_time, null),
     tareWeight: row.tare_weight !== null ? parseFloat(row.tare_weight) : null,
     grossWeight: row.gross_weight !== null ? parseFloat(row.gross_weight) : null,
     netWeight: row.net_weight !== null ? parseFloat(row.net_weight) : null,
@@ -987,6 +1341,29 @@ function formatWeighbridgeSession(row) {
     printOptions,
     destination: row.destination || '',
     evidence,
+    locationName: row.location_name || '',
+    cultivatorName: row.cultivator_name || '',
+    loadSlipNo: row.load_slip_no || '',
+    fatherName: row.father_name || '',
+    mandal: row.mandal || '',
+    bankName: row.bank_name || '',
+    branchName: row.branch_name || '',
+    ifscCode: row.ifsc_code || '',
+    traderName: row.trader_name || '',
+    allotedMill: row.alloted_mill || '',
+    accountNo: row.account_no || '',
+    heapNo: row.heap_no || '',
+    mobileNo: row.mobile_no || '',
+    image1: row.image1 || '',
+    image2: row.image2 || '',
+    image3: row.image3 || '',
+    image4: row.image4 || '',
+    udt: row.udt ? new Date(row.udt).toISOString() : '',
+    fwUser: row.fw_user || row.operator_name || '',
+    swUser: row.sw_user || '',
+    lessWeight: row.less_weight !== null && row.less_weight !== undefined ? parseFloat(row.less_weight) : 0,
+    finalWeight: row.final_weight !== null && row.final_weight !== undefined ? parseFloat(row.final_weight) : 0,
+    moisRate: row.mois_rate !== null && row.mois_rate !== undefined ? parseFloat(row.mois_rate) : 0,
     status: row.status || 'tare',
     operatorId: row.operator_id || 'OP001',
     operatorName: row.operator_name || 'System Operator',
@@ -1009,40 +1386,60 @@ function formatWeighSlip(row) {
     }
   } catch (e) {}
 
+  const fDate = safeDatePart(row.first_weight_date || row.first_weight_time || row.date_time || row.created_at, null);
+  const sDate = safeDatePart(row.second_weight_date || row.second_weight_time, null);
+
+  const fWeight = row.first_weight !== null && row.first_weight !== undefined ? parseFloat(row.first_weight) : (row.tare_weight !== null ? parseFloat(row.tare_weight) : 0);
+  const sWeight = row.second_weight !== null && row.second_weight !== undefined ? parseFloat(row.second_weight) : (row.gross_weight !== null ? parseFloat(row.gross_weight) : 0);
+  const netWt = row.nett_weight !== null && row.nett_weight !== undefined ? parseFloat(row.nett_weight) : (row.net_weight !== null && row.net_weight !== undefined ? parseFloat(row.net_weight) : Math.abs(sWeight - fWeight));
+
   return {
     slipNumber: row.slip_number,
     sessionId: row.session_id,
+    companyName: row.company_name || row.firm_name || '',
+    companyAddress: row.company_address || '',
+    phoneNo: row.phone_no || '',
     transactionNo: row.transaction_no ? parseInt(row.transaction_no) : 0,
-    vehicleRegNo: row.vehicle_reg_no || '',
     partyName: row.party_name || '',
+    loadSlipNo: row.load_slip_no || '',
+    vehicleNo: row.vehicle_no || row.vehicle_reg_no || '',
+    vehicleRegNo: row.vehicle_reg_no || row.vehicle_no || '',
+    cultivatorName: row.cultivator_name || '',
+    fatherName: row.father_name || '',
+    mobileNo: row.mobile_no || '',
+    status: row.status || (sWeight > 0 ? 'completed' : '1st_weight_complete'),
+    moisture: row.moisture !== null && row.moisture !== undefined ? parseFloat(row.moisture) : 0,
+    bagsBales: row.bags_bales || '',
+    chessAmount: row.chess_amount !== null && row.chess_amount !== undefined ? parseFloat(row.chess_amount) : 0,
+    firstWeight: fWeight,
+    firstWeightDate: fDate,
+    firstWeightTime: safeIsoDate(row.first_weight_time, null),
+    secondWeight: sWeight,
+    secondWeightDate: sDate,
+    secondWeightTime: safeIsoDate(row.second_weight_time, null),
+    nettWeight: netWt,
+    netWeight: netWt,
+    village: row.village || '',
+    rate: row.rate !== null && row.rate !== undefined ? parseFloat(row.rate) : 0,
+    adminName: row.admin_name || row.operator_name || 'System Admin',
+    operatorName: row.operator_name || row.admin_name || 'System Admin',
     firmName: row.firm_name || '',
     product: row.material || '',
-    dateTime: row.date_time ? new Date(row.date_time).toISOString() : new Date().toISOString(),
-    firstWeight: row.first_weight !== null && row.first_weight !== undefined ? parseFloat(row.first_weight) : (row.tare_weight !== null ? parseFloat(row.tare_weight) : 0),
-    firstWeightTime: row.first_weight_time ? new Date(row.first_weight_time).toISOString() : null,
-    secondWeight: row.second_weight !== null && row.second_weight !== undefined ? parseFloat(row.second_weight) : (row.gross_weight !== null ? parseFloat(row.gross_weight) : 0),
-    secondWeightTime: row.second_weight_time ? new Date(row.second_weight_time).toISOString() : null,
-    tareWeight: parseFloat(row.tare_weight) || 0,
-    grossWeight: parseFloat(row.gross_weight) || 0,
-    netWeight: parseFloat(row.net_weight) || 0,
     material: row.material || '',
-    rate: row.rate !== null && row.rate !== undefined ? parseFloat(row.rate) : 0,
-    moisture: row.moisture !== null && row.moisture !== undefined ? parseFloat(row.moisture) : 0,
+    dateTime: safeIsoDate(row.date_time, new Date().toISOString()),
+    tareWeight: parseFloat(row.tare_weight) || fWeight,
+    grossWeight: parseFloat(row.gross_weight) || sWeight,
     deduction: row.deduction !== null && row.deduction !== undefined ? parseFloat(row.deduction) : 0,
     charges: row.charges !== null && row.charges !== undefined ? parseFloat(row.charges) : 0,
     vehicleType: row.vehicle_type || '',
-    bagsBales: row.bags_bales || '',
     agent: row.agent || '',
-    village: row.village || '',
     chessNo: row.chess_no || '',
-    chessAmount: row.chess_amount !== null && row.chess_amount !== undefined ? parseFloat(row.chess_amount) : 0,
     chessName: row.chess_name || '',
     finalRate: row.final_rate !== null && row.final_rate !== undefined ? parseFloat(row.final_rate) : 0,
     totalAmount: row.total_amount !== null && row.total_amount !== undefined ? parseFloat(row.total_amount) : 0,
     printOptions,
     driverName: row.driver_name || '',
     destination: row.destination || '',
-    operatorName: row.operator_name || 'System Operator',
     evidence,
     createdAt: row.created_at,
   };
@@ -1051,7 +1448,12 @@ function formatWeighSlip(row) {
 // GET /api/weighbridge/next-transaction-no
 app.get('/api/weighbridge/next-transaction-no', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT COALESCE(MAX(transaction_no), 0) + 1 AS nextTx FROM weighbridge_sessions');
+    const [rows] = await pool.query(`
+      SELECT GREATEST(
+        COALESCE((SELECT MAX(transaction_no) FROM weighbridge_sessions WHERE first_weight IS NOT NULL OR second_weight IS NOT NULL OR tare_weight IS NOT NULL OR gross_weight IS NOT NULL), 0),
+        COALESCE((SELECT MAX(transaction_no) FROM weigh_slips WHERE first_weight IS NOT NULL OR second_weight IS NOT NULL OR tare_weight IS NOT NULL OR gross_weight IS NOT NULL), 0)
+      ) + 1 AS nextTx
+    `);
     res.json({ nextTransactionNo: rows[0].nextTx || 1 });
   } catch (error) {
     console.error('Get next transaction no error:', error);
@@ -1071,6 +1473,34 @@ app.get('/api/weighbridge/pending-vehicles', async (req, res) => {
     res.json(rows.map(formatWeighbridgeSession));
   } catch (error) {
     console.error('Get pending vehicles error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/weighbridge/pending-vehicle/:vehicleNo
+app.get('/api/weighbridge/pending-vehicle/:vehicleNo', async (req, res) => {
+  try {
+    const rawVeh = req.params.vehicleNo || '';
+    const cleanVeh = rawVeh.replace(/[\s\-_]/g, '').toUpperCase();
+    if (!cleanVeh) return res.status(400).json({ error: 'Vehicle number required' });
+
+    // 1. Look for pending 1st weight session for this vehicle
+    const [rows] = await pool.query(
+      `SELECT * FROM weighbridge_sessions 
+       WHERE REPLACE(REPLACE(REPLACE(UPPER(vehicle_reg_no), ' ', ''), '-', ''), '_', '') = ?
+       AND (second_weight IS NULL OR status = 'pending_2nd_weight' OR status = '1st_weight_complete' OR status = 'tare')
+       AND (first_weight IS NOT NULL OR tare_weight IS NOT NULL)
+       ORDER BY transaction_no DESC LIMIT 1`,
+      [cleanVeh]
+    );
+
+    if (rows.length > 0) {
+      return res.json({ success: true, session: formatWeighbridgeSession(rows[0]) });
+    }
+
+    return res.status(404).json({ success: false, message: 'No pending weighment session found for this vehicle' });
+  } catch (error) {
+    console.error('Pending vehicle lookup error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1113,16 +1543,161 @@ app.get('/api/weighbridge/sessions/:id', async (req, res) => {
   }
 });
 
+// Helper: Synchronize a weighbridge session to weigh_slips so both tables are kept 100% in sync
+async function syncSessionToWeighSlip(txNo, b, sessionId, sessionStatus) {
+  try {
+    const slipNumber = b.slipNumber || b.slip_number || `WS-2026-${String(txNo).padStart(4, '0')}`;
+    let compName = b.firmName || b.companyName || 'DHARANI COTTON MILLS';
+    let compAddr = 'Vikarabad, Hyderabad 500033';
+    let compPhone = '+91 20 2712 8899';
+    try {
+      const [compRows] = await pool.query('SELECT company_name, firm_name, address, city, pincode, phone FROM company_settings LIMIT 1');
+      if (compRows.length > 0) {
+        compName = compRows[0].firm_name || compRows[0].company_name || compName;
+        if (compRows[0].address) {
+          compAddr = `${compRows[0].address}, ${compRows[0].city || ''} ${compRows[0].pincode || ''}`.trim();
+        }
+        compPhone = compRows[0].phone || compPhone;
+      }
+    } catch {}
+
+    const firstWeight = b.firstWeight !== undefined && b.firstWeight !== null ? b.firstWeight : (b.tareWeight || 0);
+    const secondWeight = b.secondWeight !== undefined && b.secondWeight !== null ? b.secondWeight : (b.grossWeight || 0);
+    const nettWeight = b.nettWeight !== undefined && b.nettWeight !== null ? b.nettWeight : (b.netWeight !== undefined && b.netWeight !== null ? b.netWeight : (firstWeight && secondWeight ? Math.abs(secondWeight - firstWeight) : (firstWeight || 0)));
+
+    const fDate = b.firstWeightDate || (b.firstWeightTime ? new Date(b.firstWeightTime).toISOString().split('T')[0] : (firstWeight ? new Date().toISOString().split('T')[0] : null));
+    const sDate = b.secondWeightDate || (b.secondWeightTime ? new Date(b.secondWeightTime).toISOString().split('T')[0] : (secondWeight ? new Date().toISOString().split('T')[0] : null));
+
+    await pool.query(
+      `INSERT INTO weigh_slips (
+        slip_number, session_id, transaction_no, vehicle_reg_no, party_name, firm_name,
+        date_time, first_weight, first_weight_time, second_weight, second_weight_time,
+        tare_weight, gross_weight, net_weight, material, rate, moisture, deduction,
+        charges, vehicle_type, bags_bales, agent, village, chess_no, chess_amount,
+        chess_name, final_rate, total_amount, print_options, driver_name, destination,
+        operator_name, evidence, company_name, company_address, phone_no, load_slip_no,
+        vehicle_no, cultivator_name, location_name, father_name, mobile_no, status, first_weight_date,
+        second_weight_date, nett_weight, admin_name, product, created_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?,
+        NOW(), ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, NOW()
+      ) ON DUPLICATE KEY UPDATE
+        session_id = VALUES(session_id),
+        transaction_no = VALUES(transaction_no),
+        vehicle_reg_no = VALUES(vehicle_reg_no),
+        vehicle_no = VALUES(vehicle_no),
+        party_name = VALUES(party_name),
+        firm_name = VALUES(firm_name),
+        company_name = VALUES(company_name),
+        material = VALUES(material),
+        product = VALUES(product),
+        first_weight = VALUES(first_weight),
+        first_weight_date = VALUES(first_weight_date),
+        first_weight_time = VALUES(first_weight_time),
+        second_weight = VALUES(second_weight),
+        second_weight_date = VALUES(second_weight_date),
+        second_weight_time = VALUES(second_weight_time),
+        tare_weight = VALUES(tare_weight),
+        gross_weight = VALUES(gross_weight),
+        net_weight = VALUES(net_weight),
+        nett_weight = VALUES(nett_weight),
+        rate = VALUES(rate),
+        final_rate = VALUES(final_rate),
+        moisture = VALUES(moisture),
+        deduction = VALUES(deduction),
+        charges = VALUES(charges),
+        vehicle_type = VALUES(vehicle_type),
+        bags_bales = VALUES(bags_bales),
+        agent = VALUES(agent),
+        village = VALUES(village),
+        chess_no = VALUES(chess_no),
+        chess_amount = VALUES(chess_amount),
+        chess_name = VALUES(chess_name),
+        location_name = VALUES(location_name),
+        cultivator_name = VALUES(cultivator_name),
+        load_slip_no = VALUES(load_slip_no),
+        father_name = VALUES(father_name),
+        mobile_no = VALUES(mobile_no),
+        total_amount = VALUES(total_amount),
+        status = VALUES(status),
+        print_options = VALUES(print_options),
+        evidence = VALUES(evidence),
+        admin_name = VALUES(admin_name),
+        operator_name = VALUES(operator_name)`,
+      [
+        slipNumber,
+        sessionId,
+        txNo,
+        b.vehicleRegNo || b.vehicle_reg_no || b.vehicleNo || '',
+        b.partyName || b.party_name || '',
+        compName,
+        firstWeight,
+        toValidDateOrNull(b.firstWeightTime) || (firstWeight ? new Date() : null),
+        secondWeight,
+        toValidDateOrNull(b.secondWeightTime) || (secondWeight ? new Date() : null),
+        b.tareWeight !== undefined ? b.tareWeight : firstWeight,
+        b.grossWeight !== undefined ? b.grossWeight : secondWeight,
+        nettWeight,
+        b.material || b.product || 'cotton',
+        b.rate !== undefined ? b.rate : 0,
+        b.moisture !== undefined ? b.moisture : 0,
+        b.deduction !== undefined ? b.deduction : 0,
+        b.charges !== undefined ? b.charges : 0,
+        b.vehicleType || b.vehicle_type || '',
+        b.bagsBales || b.bags_bales || '',
+        b.agent || '',
+        b.village || '',
+        b.chessNo || b.chess_no || '',
+        b.chessAmount !== undefined ? b.chessAmount : 0,
+        b.chessName || b.chess_name || '',
+        b.finalRate !== undefined ? b.finalRate : (b.rate !== undefined ? b.rate : 0),
+        b.totalAmount !== undefined ? b.totalAmount : 0,
+        typeof b.printOptions === 'object' ? JSON.stringify(b.printOptions) : (b.print_options ? JSON.stringify(b.print_options) : '{}'),
+        b.driverName || b.driver_name || '',
+        b.destination || '',
+        b.operatorName || b.operator_name || 'System Admin',
+        typeof b.evidence === 'object' ? JSON.stringify(b.evidence) : (b.evidence ? JSON.stringify(b.evidence) : '[]'),
+        compName,
+        compAddr,
+        compPhone,
+        b.loadSlipNo || b.load_slip_no || '',
+        b.vehicleNo || b.vehicleRegNo || b.vehicle_reg_no || '',
+        b.cultivatorName || b.cultivator_name || '',
+        b.locationName || b.location_name || '',
+        b.fatherName || b.father_name || '',
+        b.mobileNo || b.mobile_no || '',
+        sessionStatus || b.status || (secondWeight ? 'completed' : 'pending_2nd_weight'),
+        fDate,
+        sDate,
+        nettWeight,
+        b.adminName || b.operatorName || 'System Admin',
+        b.product || b.material || 'cotton'
+      ]
+    );
+  } catch (err) {
+    console.error('syncSessionToWeighSlip warning:', err.message);
+  }
+}
+
 // POST /api/weighbridge/sessions
 app.post('/api/weighbridge/sessions', async (req, res) => {
   try {
     const b = req.body;
-    const sessionId = b.sessionId || b.session_id || `WB-SESS-${Date.now()}`;
 
     // Auto-calculate transaction number if omitted
     let txNo = b.transactionNo || b.transaction_no;
     if (!txNo) {
-      const [maxRes] = await pool.query('SELECT COALESCE(MAX(transaction_no), 0) + 1 AS nextTx FROM weighbridge_sessions');
+      const [maxRes] = await pool.query(`
+        SELECT COALESCE(MAX(transaction_no), 0) + 1 AS nextTx 
+        FROM weighbridge_sessions 
+        WHERE (first_weight IS NOT NULL OR second_weight IS NOT NULL OR tare_weight IS NOT NULL OR gross_weight IS NOT NULL)
+      `);
       txNo = maxRes[0].nextTx || 1;
     }
 
@@ -1138,20 +1713,126 @@ app.post('/api/weighbridge/sessions', async (req, res) => {
       }
     }
 
+    // Check if session already exists by transaction_no or session_id
+    let existingSessionId = null;
+    if (txNo) {
+      const [rows] = await pool.query('SELECT session_id FROM weighbridge_sessions WHERE transaction_no = ?', [txNo]);
+      if (rows.length > 0) existingSessionId = rows[0].session_id;
+    }
+    if (!existingSessionId && (b.sessionId || b.session_id)) {
+      const sid = b.sessionId || b.session_id;
+      const [rows] = await pool.query('SELECT session_id FROM weighbridge_sessions WHERE session_id = ?', [sid]);
+      if (rows.length > 0) existingSessionId = rows[0].session_id;
+    }
+
+    // Compute session status: if 2nd weight is present, it's completed; otherwise it's pending 2nd weight
+    const sessionStatus = (secondWeight !== null && secondWeight > 0)
+      ? 'completed'
+      : 'pending_2nd_weight';
+
+    if (existingSessionId) {
+      // Update existing session
+      await pool.query(
+        `UPDATE weighbridge_sessions SET
+          vehicle_reg_no = COALESCE(?, vehicle_reg_no),
+          party_name = COALESCE(?, party_name),
+          firm_name = COALESCE(?, firm_name),
+          first_weight = COALESCE(?, first_weight),
+          first_weight_time = COALESCE(?, first_weight_time),
+          second_weight = ?,
+          second_weight_time = ?,
+          tare_weight = COALESCE(?, tare_weight),
+          gross_weight = ?,
+          net_weight = ?,
+          material = COALESCE(?, material),
+          rate = COALESCE(?, rate),
+          moisture = COALESCE(?, moisture),
+          deduction = COALESCE(?, deduction),
+          charges = COALESCE(?, charges),
+          vehicle_type = COALESCE(?, vehicle_type),
+          bags_bales = COALESCE(?, bags_bales),
+          agent = COALESCE(?, agent),
+          village = COALESCE(?, village),
+          chess_no = COALESCE(?, chess_no),
+          chess_amount = COALESCE(?, chess_amount),
+          chess_name = COALESCE(?, chess_name),
+          location_name = COALESCE(?, location_name),
+          cultivator_name = COALESCE(?, cultivator_name),
+          load_slip_no = COALESCE(?, load_slip_no),
+          mobile_no = COALESCE(?, mobile_no),
+          final_rate = COALESCE(?, final_rate),
+          total_amount = COALESCE(?, total_amount),
+          print_options = COALESCE(?, print_options),
+          driver_name = COALESCE(?, driver_name),
+          destination = COALESCE(?, destination),
+          evidence = COALESCE(?, evidence),
+          status = ?,
+          operator_id = COALESCE(?, operator_id),
+          operator_name = COALESCE(?, operator_name),
+          updated_at = NOW()
+        WHERE session_id = ?`,
+        [
+          b.vehicleRegNo || b.vehicle_reg_no || null,
+          b.partyName || b.party_name || null,
+          b.firmName || b.firm_name || null,
+          firstWeight,
+          toValidDateOrNull(b.firstWeightTime) || (firstWeight !== null ? new Date() : null),
+          secondWeight,
+          toValidDateOrNull(b.secondWeightTime) || (secondWeight !== null ? new Date() : null),
+          b.tareWeight !== undefined ? b.tareWeight : firstWeight,
+          b.grossWeight !== undefined ? b.grossWeight : secondWeight,
+          netWeight,
+          b.material || b.product || null,
+          b.rate !== undefined ? b.rate : null,
+          b.moisture !== undefined ? b.moisture : null,
+          b.deduction !== undefined ? b.deduction : null,
+          b.charges !== undefined ? b.charges : null,
+          b.vehicleType || b.vehicle_type || null,
+          b.bagsBales || b.bags_bales || null,
+          b.agent || null,
+          b.village || null,
+          b.chessNo || b.chess_no || null,
+          b.chessAmount !== undefined ? b.chessAmount : null,
+          b.chessName || b.chess_name || null,
+          b.locationName || b.location_name || null,
+          b.cultivatorName || b.cultivator_name || null,
+          b.loadSlipNo || b.load_slip_no || null,
+          b.mobileNo || b.mobile_no || null,
+          b.finalRate !== undefined ? b.finalRate : null,
+          b.totalAmount !== undefined ? b.totalAmount : null,
+          b.printOptions ? JSON.stringify(b.printOptions) : null,
+          b.driverName || b.driver_name || null,
+          b.destination || null,
+          b.evidence ? JSON.stringify(b.evidence) : null,
+          sessionStatus,
+          b.operatorId || null,
+          b.operatorName || null,
+          existingSessionId
+        ]
+      );
+
+      await syncSessionToWeighSlip(txNo, b, existingSessionId, sessionStatus);
+      return res.status(200).json({ success: true, sessionId: existingSessionId, transactionNo: txNo, message: 'Weighbridge session updated' });
+    }
+
+    // Insert new session
+    const sessionId = b.sessionId || b.session_id || `WB-SESS-${Date.now()}`;
     await pool.query(
       `INSERT INTO weighbridge_sessions (
         session_id, transaction_no, vehicle_reg_no, party_name, firm_name,
         timestamp, first_weight, first_weight_time, second_weight, second_weight_time,
         tare_weight, gross_weight, net_weight, material, rate, moisture, deduction,
         charges, vehicle_type, bags_bales, agent, village, chess_no, chess_amount,
-        chess_name, final_rate, total_amount, print_options, driver_name, destination,
+        chess_name, location_name, cultivator_name, load_slip_no, mobile_no,
+        final_rate, total_amount, print_options, driver_name, destination,
         evidence, status, operator_id, operator_name, created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?,
         NOW(), ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
         ?, ?, ?, ?, NOW(), NOW()
       )`,
       [
@@ -1161,9 +1842,9 @@ app.post('/api/weighbridge/sessions', async (req, res) => {
         b.partyName || b.party_name || '',
         b.firmName || b.firm_name || '',
         firstWeight,
-        b.firstWeightTime ? new Date(b.firstWeightTime) : (firstWeight !== null ? new Date() : null),
+        toValidDateOrNull(b.firstWeightTime) || (firstWeight !== null ? new Date() : null),
         secondWeight,
-        b.secondWeightTime ? new Date(b.secondWeightTime) : (secondWeight !== null ? new Date() : null),
+        toValidDateOrNull(b.secondWeightTime) || (secondWeight !== null ? new Date() : null),
         b.tareWeight !== undefined ? b.tareWeight : firstWeight,
         b.grossWeight !== undefined ? b.grossWeight : secondWeight,
         netWeight,
@@ -1179,18 +1860,23 @@ app.post('/api/weighbridge/sessions', async (req, res) => {
         b.chessNo || b.chess_no || '',
         b.chessAmount !== undefined ? b.chessAmount : 0,
         b.chessName || b.chess_name || '',
+        b.locationName || b.location_name || '',
+        b.cultivatorName || b.cultivator_name || '',
+        b.loadSlipNo || b.load_slip_no || '',
+        b.mobileNo || b.mobile_no || '',
         b.finalRate !== undefined ? b.finalRate : 0,
         b.totalAmount !== undefined ? b.totalAmount : 0,
         JSON.stringify(b.printOptions || { printDuplicate: false, printQrCode: true, printImages: true }),
         b.driverName || b.driver_name || '',
         b.destination || '',
         JSON.stringify(b.evidence || []),
-        b.status || (secondWeight ? 'completed' : 'pending_2nd_weight'),
+        sessionStatus,
         b.operatorId || 'OP001',
         b.operatorName || 'System Operator'
       ]
     );
 
+    await syncSessionToWeighSlip(txNo, b, sessionId, sessionStatus);
     res.status(201).json({ success: true, sessionId, transactionNo: txNo, message: 'Weighbridge session created' });
   } catch (error) {
     console.error('Create weighbridge session error:', error);
@@ -1246,6 +1932,21 @@ app.put('/api/weighbridge/sessions/:id', async (req, res) => {
     } else {
       await pool.query(`UPDATE weighbridge_sessions SET ${updates.join(', ')} WHERE session_id = ?`, [...params, req.params.id]);
     }
+
+    try {
+      const [updatedRows] = await pool.query(
+        isNumeric 
+          ? 'SELECT * FROM weighbridge_sessions WHERE transaction_no = ? OR session_id = ?' 
+          : 'SELECT * FROM weighbridge_sessions WHERE session_id = ?',
+        isNumeric ? [parseInt(req.params.id), req.params.id] : [req.params.id]
+      );
+      if (updatedRows.length > 0) {
+        await syncSessionToWeighSlip(updatedRows[0].transaction_no, updatedRows[0], updatedRows[0].session_id, updatedRows[0].status);
+      }
+    } catch (syncErr) {
+      console.warn('Sync PUT session to weigh_slips warning:', syncErr.message);
+    }
+
     res.json({ success: true, message: 'Session updated successfully' });
   } catch (error) {
     console.error('Update weighbridge session error:', error);
@@ -1263,16 +1964,21 @@ async function uploadFilesToFtp(files, ftpConfig) {
   const client = new ftp.Client();
   client.ftp.verbose = false;
   try {
+    const host = ftpConfig.host || process.env.FTP_HOST || 'ftp.activitsol.com';
+    const port = parseInt(ftpConfig.port, 10) || 2121;
+    const user = ftpConfig.user || process.env.FTP_USER || 'demo';
+    const password = ftpConfig.password || process.env.FTP_PASSWORD || 'Password@123';
+    const remoteDir = ftpConfig.remoteDir || process.env.FTP_DIR || '/Dharani';
+
     await client.access({
-      host: ftpConfig.host,
-      port: parseInt(ftpConfig.port) || 21,
-      user: ftpConfig.user || 'anonymous',
-      password: ftpConfig.password || '',
+      host,
+      port,
+      user,
+      password,
       secure: Boolean(ftpConfig.secure),
-      timeout: 5000,
+      timeout: 10000,
     });
 
-    const remoteDir = ftpConfig.remoteDir || '/snapshots';
     if (remoteDir && remoteDir !== '/' && remoteDir !== '.') {
       await client.ensureDir(remoteDir);
     }
@@ -1281,7 +1987,11 @@ async function uploadFilesToFtp(files, ftpConfig) {
     for (const f of files) {
       try {
         await client.uploadFrom(f.localPath, f.fileName);
+        if (typeof ftpAnprWatcher?.markFileProcessed === 'function') {
+          ftpAnprWatcher.markFileProcessed(f.fileName);
+        }
         results.push({ fileName: f.fileName, success: true, remotePath: `${remoteDir}/${f.fileName}` });
+        console.log(`✅ [FTP Upload] Stored camera snapshot in ${remoteDir}/${f.fileName}`);
       } catch (err) {
         console.warn(`FTP file upload failed for ${f.fileName}:`, err.message);
         results.push({ fileName: f.fileName, success: false, error: err.message });
@@ -1310,6 +2020,8 @@ app.post('/api/weighbridge/snapshots/upload', async (req, res) => {
 
     const txNo = transactionNo || '0';
     const now = Date.now();
+    const cleanVeh = (vehicleRegNo || '').replace(/[\s\-_]/g, '').toUpperCase();
+    const vehPrefix = cleanVeh ? `${cleanVeh}_` : '';
     const savedFiles = [];
     const snapshots = [];
 
@@ -1322,7 +2034,7 @@ app.post('/api/weighbridge/snapshots/upload', async (req, res) => {
       
       const base64Data = rawData.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(base64Data, 'base64');
-      const fileName = `wb-tx${txNo}-${cId}-${now}-${i}.jpg`;
+      const fileName = `${vehPrefix}tx${txNo}_${cId}_${now}_${i}.jpg`;
       const localPath = path.join(snapshotsDir, fileName);
 
       fs.writeFileSync(localPath, buffer);
@@ -1341,17 +2053,31 @@ app.post('/api/weighbridge/snapshots/upload', async (req, res) => {
       });
     }
 
-    // Check FTP config from company_settings
+    // Check FTP config from company_settings or environment defaults
     let ftpSummary = { enabled: false, message: 'FTP not enabled in company settings' };
     try {
       const [rows] = await pool.query('SELECT weighbridge_defaults FROM company_settings LIMIT 1');
+      let defaults = null;
       if (rows.length > 0 && rows[0].weighbridge_defaults) {
-        const defaults = typeof rows[0].weighbridge_defaults === 'string'
+        defaults = typeof rows[0].weighbridge_defaults === 'string'
           ? JSON.parse(rows[0].weighbridge_defaults)
           : rows[0].weighbridge_defaults;
-        if (defaults && defaults.ftp && defaults.ftp.enabled) {
-          ftpSummary = await uploadFilesToFtp(savedFiles, defaults.ftp);
-        }
+      }
+
+      const ftpConfig = (defaults && defaults.ftp && defaults.ftp.enabled)
+        ? defaults.ftp
+        : {
+            host: process.env.FTP_HOST || 'ftp.activitsol.com',
+            port: parseInt(process.env.FTP_PORT || '2121', 10),
+            user: process.env.FTP_USER || 'demo',
+            password: process.env.FTP_PASSWORD || 'Password@123',
+            secure: false,
+            enabled: true,
+            remoteDir: process.env.FTP_DIR || '/Dharani'
+          };
+
+      if (ftpConfig && ftpConfig.enabled) {
+        ftpSummary = await uploadFilesToFtp(savedFiles, ftpConfig);
       }
     } catch (ftpErr) {
       console.warn('FTP check error:', ftpErr.message);
@@ -1381,7 +2107,7 @@ app.post('/api/weighbridge/snapshots/upload', async (req, res) => {
 
 // POST /api/company-settings/test-ftp
 app.post('/api/company-settings/test-ftp', async (req, res) => {
-  const { host, port = 21, user = 'anonymous', password = '', secure = false, remoteDir = '/snapshots' } = req.body;
+  const { host = 'ftp.activitsol.com', port, user = 'demo', password = 'Password@123', secure = false, remoteDir = '/Dharani' } = req.body;
   if (!host) {
     return res.status(400).json({ success: false, error: 'FTP Host is required' });
   }
@@ -1389,13 +2115,14 @@ app.post('/api/company-settings/test-ftp', async (req, res) => {
   const client = new ftp.Client();
   client.ftp.verbose = false;
   try {
+    const effectivePort = parseInt(port, 10) || (host.includes('activitsol.com') || host.includes('213.210.37.249') ? 2121 : 21);
     await client.access({
       host,
-      port: parseInt(port) || 21,
+      port: effectivePort,
       user,
       password,
       secure: Boolean(secure),
-      timeout: 5000,
+      timeout: 10000,
     });
 
     if (remoteDir && remoteDir !== '/' && remoteDir !== '.') {
@@ -1417,18 +2144,307 @@ app.post('/api/company-settings/test-ftp', async (req, res) => {
   }
 });
 
-// ==================== THIRD-PARTY WEIGHBRIDGE INTEGRATION ENGINE ====================
+// ==================== THIRD-PARTY & VENTEK WEIGHBRIDGE INTEGRATION ENGINE ====================
 
 // In-memory live scale state, defaults to zero (00000)
 let liveScaleReading = {
   weight: 0,
+  weightQtl: 0,
   unit: 'kg',
   stable: true,
   zero: true,
   timestamp: new Date().toISOString(),
   source: 'standby',
   connected: false,
+  deviceCode: 'VMS',
+  deviceName: 'New VMS',
 };
+
+// Parser for Ventek VMS-WB serial data frames & emulator streams
+function parseVentekFrame(rawLine, config = {}) {
+  if (!rawLine || typeof rawLine !== 'string') return null;
+  // Clean non-printable ASCII control characters (STX, ETX, NUL, etc.)
+  const clean = rawLine.replace(/[\x00-\x1F\x7F]/g, ' ').trim();
+  if (!clean) return null;
+
+  // Split tokens by space
+  const tokens = clean.split(/\s+/).filter(Boolean);
+  
+  // Find numeric candidates that are NOT timestamps (do not contain '/' or ':')
+  const numTokens = tokens.filter(t => !t.includes('/') && !t.includes(':') && /[\d]/.test(t));
+  
+  let targetNumStr = null;
+  if (numTokens.length > 0) {
+    // The actual weight is typically the last non-timestamp numeric token
+    targetNumStr = numTokens[numTokens.length - 1];
+  } else {
+    // Fallback: search for number pattern
+    const m = clean.match(/([+-]?\d+(?:\.\d+)?)/);
+    if (m) targetNumStr = m[1];
+  }
+
+  if (!targetNumStr) return null;
+  
+  const match = targetNumStr.match(/([+-]?\d+(?:\.\d+)?)/);
+  if (!match) return null;
+
+  const rawNum = parseFloat(match[1].replace(/\s+/g, ''));
+  if (isNaN(rawNum)) return null;
+
+  let weightKg = 0;
+  let weightQtl = 0;
+
+  if (rawNum <= 500) {
+    // Indicator is transmitting in Quintals (e.g. 250.00 Qtl -> 25,000 kg)
+    weightQtl = Number(rawNum.toFixed(2));
+    weightKg = Math.min(50000, Math.max(0, Math.round(rawNum * 100)));
+  } else if (rawNum <= 50000) {
+    // Value is directly in kg (e.g. 24580 kg -> 245.80 Qtl)
+    weightKg = Math.round(rawNum);
+    weightQtl = Number((weightKg / 100).toFixed(2));
+  } else {
+    // Large raw value from emulator or 2-decimal implied value:
+    // e.g. 3768212 -> 37,682.12 kg (376.82 Qtl)
+    let scaled = rawNum / 100;
+    if (scaled > 50000) {
+      weightKg = Math.round(scaled % 50000);
+      if (weightKg === 0) weightKg = 24500;
+    } else {
+      weightKg = Math.round(scaled);
+    }
+    weightQtl = Number((weightKg / 100).toFixed(2));
+  }
+
+  // Detect motion / stability flags
+  const isUnstable = /US|MOT|\bM\b/i.test(clean);
+  const stable = !isUnstable;
+
+  return {
+    weight: weightKg,
+    weightQtl: weightQtl,
+    unit: 'kg',
+    stable,
+    zero: weightKg === 0,
+    timestamp: new Date().toISOString(),
+    source: 'ventek_serial',
+    deviceCode: config.device_code || 'VMS',
+    deviceName: config.display_name || 'New VMS',
+    raw: clean,
+    connected: true,
+  };
+}
+
+// Ventek Serial Manager Service
+class VentekSerialService {
+  constructor() {
+    this.port = null;
+    this.config = {
+      id: 'dev-vms-001',
+      device_code: 'VMS',
+      display_name: 'New VMS',
+      manufacturer: 'VENTEK',
+      model: 'VMS-WB',
+      serial_number: '168',
+      capacity_kg: 50000,
+      port: 'COM3',
+      baud_rate: 2400,
+      interface_type: 'RS232',
+      data_bits: 8,
+      stop_bits: 1,
+      parity: 'none',
+      sample_time_ms: 1000,
+      byte_range: '1-8',
+      unit_type: 'Qtl',
+      is_active: 1,
+    };
+    this.isConnected = false;
+    this.lastError = null;
+    this.lastReadingTime = null;
+    this.lastRawPacket = '';
+    this.reconnectTimer = null;
+    this.pollTimer = null;
+    this.incomingBuffer = '';
+    this._warnedOffline = false;
+  }
+
+  async loadConfigFromDb() {
+    try {
+      const [rows] = await pool.query('SELECT * FROM weighbridge_devices WHERE is_active = 1 LIMIT 1');
+      if (rows.length > 0) {
+        this.config = { ...this.config, ...rows[0] };
+        console.log(`[VentekSerial] Loaded device config from DB: ${this.config.display_name} (${this.config.model}) on ${this.config.port} @ ${this.config.baud_rate} baud`);
+      }
+    } catch (err) {
+      console.warn('[VentekSerial] Could not query weighbridge_devices table:', err.message);
+    }
+  }
+
+  start() {
+    this.loadConfigFromDb().then(() => {
+      this.connect();
+    });
+  }
+
+  scheduleReconnect(delay = 5000) {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  async connect() {
+    if (this.port && this.port.isOpen) {
+      return;
+    }
+
+    const portPath = this.config.port || 'COM3';
+    try {
+      this.port = new SerialPort({
+        path: portPath,
+        baudRate: parseInt(this.config.baud_rate, 10) || 2400,
+        dataBits: parseInt(this.config.data_bits, 10) || 8,
+        stopBits: parseInt(this.config.stop_bits, 10) || 1,
+        parity: (this.config.parity || 'none').toLowerCase(),
+        autoOpen: false,
+      });
+
+      this.port.open((err) => {
+        if (err) {
+          this.isConnected = false;
+          this.lastError = err.message;
+
+          // Auto-bridge failover: if COM3 is busy (e.g. used by emulator), try COM2, or vice versa
+          if (/access denied/i.test(err.message)) {
+            const alternatePort = portPath.toUpperCase() === 'COM3' ? 'COM2' : (portPath.toUpperCase() === 'COM2' ? 'COM3' : null);
+            if (alternatePort && !this._triedAlternate) {
+              console.log(`[VentekSerial] ${portPath} is busy (${err.message}). Auto-switching to paired port ${alternatePort}...`);
+              this._triedAlternate = true;
+              this.config.port = alternatePort;
+              this.port = null;
+              this.connect();
+              return;
+            }
+          }
+
+          this._triedAlternate = false;
+          if (!this._warnedOffline) {
+            console.log(`[VentekSerial] Port ${portPath} currently offline (${err.message}). Auto-reconnect active.`);
+            this._warnedOffline = true;
+          }
+          this.scheduleReconnect(5000);
+          return;
+        }
+
+        this.isConnected = true;
+        this.lastError = null;
+        this._warnedOffline = false;
+        this._triedAlternate = false;
+        console.log(`[VentekSerial] 🚀 Successfully connected to ${portPath} [${this.config.manufacturer} ${this.config.model} - ${this.config.display_name}] @ ${this.config.baud_rate} baud`);
+
+        // If indicator requires query heartbeat (e.g. W\r or P\r), send request periodically
+        if (this.pollTimer) clearInterval(this.pollTimer);
+        this.pollTimer = setInterval(() => {
+          if (this.port && this.port.isOpen) {
+            try {
+              // Send 'W\r' query for command-mode indicators (ignored by continuous broadcast units)
+              this.port.write('W\r', () => {});
+            } catch (e) {}
+          }
+        }, Math.max(500, parseInt(this.config.sample_time_ms, 10) || 1000));
+      });
+
+      this.port.on('data', (chunk) => {
+        const text = chunk.toString('utf8');
+        this.incomingBuffer += text;
+        this.lastRawPacket = text.trim();
+
+        // If buffer contains line breaks, split and process full lines
+        if (/[\r\n]/.test(this.incomingBuffer)) {
+          const lines = this.incomingBuffer.split(/[\r\n]+/);
+          this.incomingBuffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.trim().length > 0) {
+              this.handleFrame(line);
+            }
+          }
+        }
+
+        // Debounce timer: flush buffer if no new delimiter arrives within 250ms
+        if (this._flushTimer) clearTimeout(this._flushTimer);
+        this._flushTimer = setTimeout(() => {
+          if (this.incomingBuffer && this.incomingBuffer.trim().length > 0) {
+            this.handleFrame(this.incomingBuffer);
+            this.incomingBuffer = '';
+          }
+        }, 250);
+      });
+
+      this.port.on('error', (err) => {
+        this.isConnected = false;
+        this.lastError = err.message;
+        console.warn(`[VentekSerial] Port error on ${this.config.port}:`, err.message);
+        this.scheduleReconnect(5000);
+      });
+
+      this.port.on('close', () => {
+        this.isConnected = false;
+        console.log(`[VentekSerial] Port ${this.config.port} closed.`);
+        this.scheduleReconnect(5000);
+      });
+
+    } catch (err) {
+      this.isConnected = false;
+      this.lastError = err.message;
+      this.scheduleReconnect(5000);
+    }
+  }
+
+  handleFrame(line) {
+    const parsed = parseVentekFrame(line, this.config);
+    if (parsed) {
+      this.lastReadingTime = parsed.timestamp;
+      this.lastRawPacket = parsed.raw;
+      liveScaleReading = {
+        ...liveScaleReading,
+        ...parsed,
+      };
+      console.log(`[VentekSerial] Live Weight: ${parsed.weight} KG (${parsed.weightQtl} Qtl) | Raw: "${parsed.raw}"`);
+    }
+  }
+
+  async close() {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.port && this.port.isOpen) {
+      return new Promise((resolve) => {
+        this.port.close(() => {
+          this.isConnected = false;
+          this.port = null;
+          resolve();
+        });
+      });
+    }
+    this.port = null;
+    this.isConnected = false;
+  }
+
+  async updateConfigAndRestart(newConfig) {
+    await this.close();
+    this.config = { ...this.config, ...newConfig };
+    this._warnedOffline = false;
+    await this.connect();
+  }
+}
+
+const ventekSerialService = new VentekSerialService();
 
 // Default scale data directory for third-party file sync
 const scaleDataDir = path.resolve(__dirname, '..', 'data');
@@ -1500,7 +2516,26 @@ app.get('/api/weighbridge/live-weight', async (req, res) => {
       }
     }
 
-    res.json(liveScaleReading);
+    const weightKg = Number(liveScaleReading.weight) || 0;
+    const weightQtl = liveScaleReading.weightQtl !== undefined 
+      ? Number(liveScaleReading.weightQtl) 
+      : Number((weightKg / 100).toFixed(2));
+
+    const payload = {
+      ...liveScaleReading,
+      weight: weightKg,
+      weightQtl,
+      serialConnected: ventekSerialService.isConnected,
+      serialPort: ventekSerialService.config.port || 'COM3',
+      baudRate: ventekSerialService.config.baud_rate || 2400,
+      deviceCode: ventekSerialService.config.device_code || 'VMS',
+      deviceName: ventekSerialService.config.display_name || 'New VMS',
+      model: ventekSerialService.config.model || 'VMS-WB',
+      unitType: ventekSerialService.config.unit_type || 'Qtl',
+      capacityKg: ventekSerialService.config.capacity_kg || 50000,
+    };
+
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1510,22 +2545,30 @@ app.get('/api/weighbridge/live-weight', async (req, res) => {
 // Webhook for third-party weighbridge desktop applications / external bridges
 app.post('/api/weighbridge/third-party/push', (req, res) => {
   try {
-    const { weight = 0, unit = 'kg', stable = true, source = 'third_party_software' } = req.body;
-    const numWeight = Math.max(0, Math.round(Number(weight) || 0));
+    const { weight = 0, weightQtl, unit = 'kg', stable = true, source = 'third_party_software' } = req.body;
+    let numWeight = Math.max(0, Math.round(Number(weight) || 0));
+    let numQtl = weightQtl !== undefined ? Number(weightQtl) : Number((numWeight / 100).toFixed(2));
+
+    if (weightQtl !== undefined && weight === undefined) {
+      numWeight = Math.round(numQtl * 100);
+    }
 
     liveScaleReading = {
       weight: numWeight,
+      weightQtl: numQtl,
       unit: unit === 'ton' ? 'ton' : 'kg',
       stable: Boolean(stable),
       zero: numWeight === 0,
       timestamp: new Date().toISOString(),
       source,
       connected: true,
+      deviceCode: ventekSerialService.config.device_code || 'VMS',
+      deviceName: ventekSerialService.config.display_name || 'New VMS',
     };
 
     res.json({
       success: true,
-      message: `Live weight updated to ${numWeight} ${unit}`,
+      message: `Live weight updated to ${numWeight} ${unit} (${numQtl} Qtl)`,
       reading: liveScaleReading,
     });
   } catch (error) {
@@ -1538,41 +2581,57 @@ app.post('/api/weighbridge/third-party/push', (req, res) => {
 app.post('/api/weighbridge/third-party/zero', (req, res) => {
   liveScaleReading = {
     weight: 0,
+    weightQtl: 0,
     unit: 'kg',
     stable: true,
     zero: true,
     timestamp: new Date().toISOString(),
     source: 'zero_command',
     connected: true,
+    deviceCode: ventekSerialService.config.device_code || 'VMS',
+    deviceName: ventekSerialService.config.display_name || 'New VMS',
   };
   try {
     if (fs.existsSync(defaultScaleFilePath)) {
       fs.writeFileSync(defaultScaleFilePath, '0\n', 'utf8');
     }
   } catch (e) {}
-  res.json({ success: true, message: 'Scale zeroed successfully to 00000', reading: liveScaleReading });
+  res.json({ success: true, message: 'Scale zeroed successfully to 00000 (0.00 Qtl)', reading: liveScaleReading });
 });
 
 // POST /api/weighbridge/third-party/simulate
 // Update simulated weight for testing
 app.post('/api/weighbridge/third-party/simulate', (req, res) => {
-  const { weight = 24580, stable = true } = req.body;
-  const numWeight = Math.max(0, Math.round(Number(weight) || 0));
+  const { weight, weightQtl, stable = true } = req.body;
+  let numWeight = 24580;
+  let numQtl = 245.80;
+
+  if (weight !== undefined) {
+    numWeight = Math.max(0, Math.round(Number(weight) || 0));
+    numQtl = Number((numWeight / 100).toFixed(2));
+  } else if (weightQtl !== undefined) {
+    numQtl = Math.max(0, Number(weightQtl) || 0);
+    numWeight = Math.round(numQtl * 100);
+  }
+
   liveScaleReading = {
     weight: numWeight,
+    weightQtl: numQtl,
     unit: 'kg',
     stable: Boolean(stable),
     zero: numWeight === 0,
     timestamp: new Date().toISOString(),
     source: 'simulation',
     connected: true,
+    deviceCode: ventekSerialService.config.device_code || 'VMS',
+    deviceName: ventekSerialService.config.display_name || 'New VMS',
   };
   try {
     if (fs.existsSync(defaultScaleFilePath)) {
       fs.writeFileSync(defaultScaleFilePath, `${numWeight}\n`, 'utf8');
     }
   } catch (e) {}
-  res.json({ success: true, message: `Simulated weight set to ${numWeight} kg`, reading: liveScaleReading });
+  res.json({ success: true, message: `Simulated weight set to ${numWeight} kg (${numQtl} Qtl)`, reading: liveScaleReading });
 });
 
 // POST /api/weighbridge/third-party/test-source
@@ -1625,6 +2684,172 @@ app.post('/api/weighbridge/third-party/test-source', async (req, res) => {
   }
 });
 
+// ==================== VENTEK HARDWARE INTEGRATION ENDPOINTS ====================
+
+// GET /api/weighbridge/device/config
+// Fetches the active Ventek weighbridge device configuration and connection status
+app.get('/api/weighbridge/device/config', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM weighbridge_devices WHERE is_active = 1 LIMIT 1');
+    const device = rows.length > 0 ? rows[0] : ventekSerialService.config;
+    res.json({
+      success: true,
+      device: {
+        id: device.id,
+        deviceCode: device.device_code || device.deviceCode,
+        displayName: device.display_name || device.displayName,
+        manufacturer: device.manufacturer,
+        model: device.model,
+        serialNumber: device.serial_number || device.serialNumber,
+        capacityKg: Number(device.capacity_kg || device.capacityKg || 50000),
+        port: device.port,
+        baudRate: Number(device.baud_rate || device.baudRate || 2400),
+        interfaceType: device.interface_type || device.interfaceType || 'RS232',
+        dataBits: Number(device.data_bits || device.dataBits || 8),
+        stopBits: Number(device.stop_bits || device.stopBits || 1),
+        parity: device.parity || 'none',
+        sampleTimeMs: Number(device.sample_time_ms || device.sampleTimeMs || 1000),
+        byteRange: device.byte_range || device.byteRange || '1-8',
+        unitType: device.unit_type || device.unitType || 'Qtl',
+        isActive: Boolean(device.is_active !== undefined ? device.is_active : true),
+      },
+      status: {
+        connected: ventekSerialService.isConnected,
+        lastError: ventekSerialService.lastError,
+        lastReadingTime: ventekSerialService.lastReadingTime,
+        lastRawPacket: ventekSerialService.lastRawPacket,
+        currentWeightKg: liveScaleReading.weight,
+        currentWeightQtl: liveScaleReading.weightQtl !== undefined ? liveScaleReading.weightQtl : Number((liveScaleReading.weight / 100).toFixed(2)),
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// PUT /api/weighbridge/device/config
+// Updates active device configuration and immediately updates serial connection
+app.put('/api/weighbridge/device/config', async (req, res) => {
+  try {
+    const b = req.body;
+    const deviceCode = b.deviceCode || b.device_code || 'VMS';
+    const displayName = b.displayName || b.display_name || 'New VMS';
+    const manufacturer = b.manufacturer || 'VENTEK';
+    const model = b.model || 'VMS-WB';
+    const serialNumber = b.serialNumber || b.serial_number || '168';
+    const capacityKg = Number(b.capacityKg || b.capacity_kg) || 50000;
+    const port = b.port || 'COM3';
+    const baudRate = Number(b.baudRate || b.baud_rate) || 2400;
+    const interfaceType = b.interfaceType || b.interface_type || 'RS232';
+    const dataBits = Number(b.dataBits || b.data_bits) || 8;
+    const stopBits = Number(b.stopBits || b.stop_bits) || 1;
+    const parity = (b.parity || 'none').toLowerCase();
+    const sampleTimeMs = Number(b.sampleTimeMs || b.sample_time_ms) || 1000;
+    const byteRange = b.byteRange || b.byte_range || '1-8';
+    const unitType = b.unitType || b.unit_type || 'Qtl';
+
+    const [existing] = await pool.query('SELECT id FROM weighbridge_devices LIMIT 1');
+    if (existing.length > 0) {
+      await pool.query(
+        `UPDATE weighbridge_devices SET
+          device_code = ?, display_name = ?, manufacturer = ?, model = ?,
+          serial_number = ?, capacity_kg = ?, port = ?, baud_rate = ?,
+          interface_type = ?, data_bits = ?, stop_bits = ?, parity = ?,
+          sample_time_ms = ?, byte_range = ?, unit_type = ?, is_active = 1,
+          updated_at = NOW()
+        WHERE id = ?`,
+        [deviceCode, displayName, manufacturer, model, serialNumber, capacityKg, port, baudRate, interfaceType, dataBits, stopBits, parity, sampleTimeMs, byteRange, unitType, existing[0].id]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO weighbridge_devices 
+          (id, device_code, display_name, manufacturer, model, serial_number, capacity_kg, port, baud_rate, interface_type, data_bits, stop_bits, parity, sample_time_ms, byte_range, unit_type, is_active)
+        VALUES 
+          ('dev-vms-001', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [deviceCode, displayName, manufacturer, model, serialNumber, capacityKg, port, baudRate, interfaceType, dataBits, stopBits, parity, sampleTimeMs, byteRange, unitType]
+      );
+    }
+
+    const updatedConfig = {
+      id: existing.length > 0 ? existing[0].id : 'dev-vms-001',
+      device_code: deviceCode,
+      display_name: displayName,
+      manufacturer,
+      model,
+      serial_number: serialNumber,
+      capacity_kg: capacityKg,
+      port,
+      baud_rate: baudRate,
+      interface_type: interfaceType,
+      data_bits: dataBits,
+      stop_bits: stopBits,
+      parity,
+      sample_time_ms: sampleTimeMs,
+      byte_range: byteRange,
+      unit_type: unitType,
+      is_active: 1,
+    };
+
+    await ventekSerialService.updateConfigAndRestart(updatedConfig);
+
+    res.json({
+      success: true,
+      message: `Ventek device configuration updated for ${displayName} on ${port} @ ${baudRate} baud`,
+      config: updatedConfig,
+      connected: ventekSerialService.isConnected,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/weighbridge/ports
+// Discovers COM serial ports on the host system
+app.get('/api/weighbridge/ports', async (req, res) => {
+  try {
+    const ports = await SerialPort.list();
+    res.json({
+      success: true,
+      ports: ports.map(p => ({
+        path: p.path,
+        manufacturer: p.manufacturer || 'Standard Serial Port',
+        friendlyName: p.friendlyName || p.path,
+        pnpId: p.pnpId || '',
+        productId: p.productId || '',
+        vendorId: p.vendorId || '',
+      })),
+      activePort: ventekSerialService.config.port || 'COM3',
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message, ports: [] });
+  }
+});
+
+// POST /api/weighbridge/device/test
+// Tests connectivity to specified COM port
+app.post('/api/weighbridge/device/test', async (req, res) => {
+  try {
+    const { port = 'COM3', baudRate = 2400 } = req.body;
+    const availablePorts = await SerialPort.list();
+    const found = availablePorts.some(p => p.path.toUpperCase() === port.toUpperCase());
+    
+    res.json({
+      success: true,
+      port,
+      baudRate,
+      availableOnSystem: found,
+      allPorts: availablePorts.map(p => p.path),
+      message: found 
+        ? `Port ${port} is active on system hardware.` 
+        : `Port ${port} is not currently detected on system. Please verify USB-serial converter is plugged into PC.`,
+      currentConnected: ventekSerialService.isConnected && ventekSerialService.config.port === port,
+      lastError: ventekSerialService.lastError,
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // GET /api/weighbridge/slips
 app.get('/api/weighbridge/slips', async (req, res) => {
   try {
@@ -1645,6 +2870,25 @@ app.post('/api/weighbridge/slips', async (req, res) => {
     const b = req.body;
     const slipNumber = b.slipNumber || `SLIP-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`;
 
+    let compName = b.companyName || b.firmName || '';
+    let compAddr = b.companyAddress || '';
+    let compPhone = b.phoneNo || '';
+    try {
+      const [compRows] = await pool.query('SELECT company_name, firm_name, address, city, pincode, phone FROM company_settings LIMIT 1');
+      if (compRows.length > 0) {
+        if (!compName) compName = compRows[0].firm_name || compRows[0].company_name || '';
+        if (!compAddr) compAddr = compRows[0].address ? `${compRows[0].address}, ${compRows[0].city || ''} ${compRows[0].pincode || ''}`.trim() : '';
+        if (!compPhone) compPhone = compRows[0].phone || '';
+      }
+    } catch (e) {}
+
+    const firstWeight = b.firstWeight !== undefined ? b.firstWeight : (b.tareWeight || 0);
+    const secondWeight = b.secondWeight !== undefined ? b.secondWeight : (b.grossWeight || 0);
+    const nettWeight = b.nettWeight !== undefined ? b.nettWeight : (b.netWeight !== undefined ? b.netWeight : Math.abs(secondWeight - firstWeight));
+
+    const fDate = b.firstWeightDate || (b.firstWeightTime ? new Date(b.firstWeightTime).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+    const sDate = b.secondWeightDate || (b.secondWeightTime ? new Date(b.secondWeightTime).toISOString().split('T')[0] : (secondWeight ? new Date().toISOString().split('T')[0] : null));
+
     await pool.query(
       `INSERT INTO weigh_slips (
         slip_number, session_id, transaction_no, vehicle_reg_no, party_name, firm_name,
@@ -1652,29 +2896,60 @@ app.post('/api/weighbridge/slips', async (req, res) => {
         tare_weight, gross_weight, net_weight, material, rate, moisture, deduction,
         charges, vehicle_type, bags_bales, agent, village, chess_no, chess_amount,
         chess_name, final_rate, total_amount, print_options, driver_name, destination,
-        operator_name, evidence, created_at
+        operator_name, evidence, company_name, company_address, phone_no, load_slip_no,
+        vehicle_no, cultivator_name, location_name, father_name, mobile_no, status, first_weight_date,
+        second_weight_date, nett_weight, admin_name, created_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         NOW(), ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?,
-        ?, ?, NOW()
-      )`,
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, NOW()
+      ) ON DUPLICATE KEY UPDATE
+        transaction_no = VALUES(transaction_no),
+        vehicle_reg_no = VALUES(vehicle_reg_no),
+        party_name = VALUES(party_name),
+        first_weight = VALUES(first_weight),
+        first_weight_time = VALUES(first_weight_time),
+        second_weight = VALUES(second_weight),
+        second_weight_time = VALUES(second_weight_time),
+        tare_weight = VALUES(tare_weight),
+        gross_weight = VALUES(gross_weight),
+        net_weight = VALUES(net_weight),
+        material = VALUES(material),
+        rate = VALUES(rate),
+        moisture = VALUES(moisture),
+        bags_bales = VALUES(bags_bales),
+        village = VALUES(village),
+        chess_no = VALUES(chess_no),
+        chess_amount = VALUES(chess_amount),
+        cultivator_name = VALUES(cultivator_name),
+        location_name = VALUES(location_name),
+        load_slip_no = VALUES(load_slip_no),
+        father_name = VALUES(father_name),
+        mobile_no = VALUES(mobile_no),
+        status = VALUES(status),
+        first_weight_date = VALUES(first_weight_date),
+        second_weight_date = VALUES(second_weight_date),
+        nett_weight = VALUES(nett_weight),
+        admin_name = VALUES(admin_name)`,
       [
         slipNumber,
         b.sessionId || `WB-SESS-${Date.now()}`,
         b.transactionNo || 0,
-        b.vehicleRegNo || '',
+        b.vehicleRegNo || b.vehicleNo || '',
         b.partyName || '',
-        b.firmName || '',
-        b.firstWeight !== undefined ? b.firstWeight : (b.tareWeight || 0),
+        compName,
+        firstWeight,
         b.firstWeightTime ? new Date(b.firstWeightTime) : null,
-        b.secondWeight !== undefined ? b.secondWeight : (b.grossWeight || 0),
+        secondWeight,
         b.secondWeightTime ? new Date(b.secondWeightTime) : null,
-        b.tareWeight || 0,
-        b.grossWeight || 0,
-        b.netWeight || 0,
+        firstWeight,
+        secondWeight,
+        nettWeight,
         b.material || b.product || '',
         b.rate !== undefined ? b.rate : 0,
         b.moisture !== undefined ? b.moisture : 0,
@@ -1692,14 +2967,478 @@ app.post('/api/weighbridge/slips', async (req, res) => {
         JSON.stringify(b.printOptions || { printDuplicate: false, printQrCode: true, printImages: true }),
         b.driverName || '',
         b.destination || '',
-        b.operatorName || 'System Operator',
-        JSON.stringify(b.evidence || [])
+        b.adminName || b.operatorName || 'System Admin',
+        JSON.stringify(b.evidence || []),
+        compName,
+        compAddr,
+        compPhone,
+        b.loadSlipNo || '',
+        b.vehicleNo || b.vehicleRegNo || '',
+        b.cultivatorName || '',
+        b.locationName || '',
+        b.fatherName || '',
+        b.mobileNo || '',
+        b.status || (secondWeight ? 'completed' : '1st_weight_complete'),
+        fDate,
+        sDate,
+        nettWeight,
+        b.adminName || b.operatorName || 'System Admin'
       ]
     );
 
     res.status(201).json({ success: true, slipNumber, message: 'Weigh slip generated' });
   } catch (error) {
     console.error('Create weigh slip error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ==========================================
+// REPORTS MODULE API (47-Field Registry & Dynamic Reports)
+// ==========================================
+
+function mapRowTo47Fields(row) {
+  let evidence = [];
+  try {
+    evidence = typeof row.evidence === 'string' ? JSON.parse(row.evidence) : (row.evidence || []);
+  } catch (e) {}
+
+  const fDate = safeDatePart(row.first_weight_time || row.created_at, '');
+  const fTime = safeTimePart(row.first_weight_time || row.created_at, '');
+  const sDate = safeDatePart(row.second_weight_time, '');
+  const sTime = safeTimePart(row.second_weight_time, '');
+  const udtStr = safeIsoDate(row.udt || row.updated_at, '')?.replace('T', ' ').substring(0, 19) || '';
+
+  const fWeight = row.first_weight !== null && row.first_weight !== undefined ? parseFloat(row.first_weight) : (row.tare_weight !== null ? parseFloat(row.tare_weight) : 0);
+  const sWeight = row.second_weight !== null && row.second_weight !== undefined ? parseFloat(row.second_weight) : (row.gross_weight !== null ? parseFloat(row.gross_weight) : 0);
+  const netWeight = row.net_weight !== null && row.net_weight !== undefined ? parseFloat(row.net_weight) : (fWeight && sWeight ? Math.abs(sWeight - fWeight) : 0);
+  const deduction = parseFloat(row.deduction || 0);
+  const moisture = parseFloat(row.moisture || 0);
+  const moisRate = parseFloat(row.mois_rate || (moisture * 0.5));
+  const lesswt = parseFloat(row.less_weight !== null && row.less_weight !== undefined ? row.less_weight : (deduction + ((netWeight * moisture) / 100)));
+  const finwt = parseFloat(row.final_weight !== null && row.final_weight !== undefined ? row.final_weight : Math.max(0, netWeight - lesswt));
+  const rate = parseFloat(row.rate || 0);
+  const finalRate = parseFloat(row.final_rate !== null && row.final_rate !== undefined ? row.final_rate : rate);
+  const charges = parseFloat(row.charges || 0);
+  const chessAmount = parseFloat(row.chess_amount || 0);
+  const totalAmount = parseFloat(row.total_amount !== null && row.total_amount !== undefined ? row.total_amount : Math.round((finwt / 1000) * finalRate + charges + chessAmount));
+
+  return {
+    TransactionNo: row.transaction_no ? parseInt(row.transaction_no) : 0,
+    FDate: fDate,
+    Charges: charges,
+    VehicleNo: row.vehicle_reg_no || '',
+    PartyName: row.party_name || '',
+    Product: row.material || '',
+    FTime: fTime,
+    FWeight: fWeight,
+    SDate: sDate,
+    STime: sTime,
+    SWeight: sWeight,
+    Status: row.status || '',
+    FWUser: row.fw_user || row.operator_name || 'System Operator',
+    SWUser: row.sw_user || '',
+    NettWeight: netWeight,
+    lesswt: lesswt,
+    Finwt: finwt,
+    MoisRate: moisRate,
+    Amount: totalAmount,
+    IMAGE1: row.image1 || (evidence[0]?.url || ''),
+    IMAGE2: row.image2 || (evidence[1]?.url || ''),
+    IMAGE3: row.image3 || (evidence[2]?.url || ''),
+    IMAGE4: row.image4 || (evidence[3]?.url || ''),
+    udt: udtStr,
+    Deduction: deduction,
+    LocationName: row.location_name || row.destination || 'Plant 1 - Yard',
+    CultivatorName: row.cultivator_name || '',
+    LoadSlipNo: row.load_slip_no || row.sap_po_number || '',
+    BagsBales: row.bags_bales || '',
+    Rate: rate,
+    Moisture: moisture,
+    ChessNo: row.chess_no || '',
+    ChessName: row.chess_name || '',
+    ChessAmount: chessAmount,
+    FatherName: row.father_name || '',
+    Mandal: row.mandal || '',
+    Village: row.village || '',
+    BankName: row.bank_name || '',
+    BranchName: row.branch_name || '',
+    IFSCODE: row.ifsc_code || '',
+    TraderName: row.trader_name || row.agent || '',
+    AllotedMil: row.alloted_mill || row.firm_name || '',
+    AccountNo: row.account_no || '',
+    Heap: row.heap_no || '',
+    FinalRate: finalRate,
+    MobileNo: row.mobile_no || '',
+    FinalWeight: finwt,
+  };
+}
+
+// GET /api/reports/fields
+app.get('/api/reports/fields', async (req, res) => {
+  try {
+    const userId = req.query.userId || 'default';
+    const reportType = req.query.reportType || 'weighment_report';
+
+    const [rows] = await pool.query(
+      `SELECT s_no AS sNo, field_key AS fieldKey, field_name AS fieldName, 
+              is_selected AS isSelected, display_order AS displayOrder
+       FROM report_field_configs
+       WHERE user_id = ? AND report_type = ?
+       ORDER BY display_order ASC, s_no ASC`,
+      [userId, reportType]
+    );
+
+    if (rows.length === 0 && userId !== 'default') {
+      const [defaultRows] = await pool.query(
+        `SELECT s_no AS sNo, field_key AS fieldKey, field_name AS fieldName, 
+                is_selected AS isSelected, display_order AS displayOrder
+         FROM report_field_configs
+         WHERE user_id = 'default' AND report_type = ?
+         ORDER BY display_order ASC, s_no ASC`,
+        [reportType]
+      );
+      return res.json(defaultRows.map(r => ({ ...r, isSelected: Boolean(r.isSelected) })));
+    }
+
+    res.json(rows.map(r => ({ ...r, isSelected: Boolean(r.isSelected) })));
+  } catch (error) {
+    console.error('Get report fields error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/reports/fields/config
+app.post('/api/reports/fields/config', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const userId = req.body.userId || 'default';
+    const reportType = req.body.reportType || 'weighment_report';
+    const fields = req.body.fields || [];
+
+    for (const f of fields) {
+      await connection.query(
+        `INSERT INTO report_field_configs 
+         (user_id, report_type, s_no, field_key, field_name, is_selected, display_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE 
+           is_selected = VALUES(is_selected),
+           display_order = VALUES(display_order)`,
+        [
+          userId,
+          reportType,
+          f.sNo || 0,
+          f.fieldKey,
+          f.fieldName || f.fieldKey,
+          f.isSelected ? 1 : 0,
+          f.displayOrder !== undefined ? f.displayOrder : (f.sNo || 0)
+        ]
+      );
+    }
+
+    await connection.commit();
+    res.json({ success: true, message: 'Report fields configuration saved successfully' });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Save report fields error:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection.release();
+  }
+});
+
+// GET /api/reports/filter-options
+app.get('/api/reports/filter-options', async (req, res) => {
+  try {
+    const [parties] = await pool.query(
+      `SELECT DISTINCT party_name FROM weighbridge_sessions WHERE party_name IS NOT NULL AND party_name != '' ORDER BY party_name ASC`
+    );
+    const [products] = await pool.query(
+      `SELECT DISTINCT material FROM weighbridge_sessions WHERE material IS NOT NULL AND material != '' ORDER BY material ASC`
+    );
+    const [statuses] = await pool.query(
+      `SELECT DISTINCT status FROM weighbridge_sessions WHERE status IS NOT NULL AND status != '' ORDER BY status ASC`
+    );
+    const [users] = await pool.query(
+      `SELECT DISTINCT name, username FROM users WHERE status = 'active' ORDER BY name ASC`
+    );
+
+    res.json({
+      parties: parties.map(p => p.party_name),
+      products: products.map(p => p.material),
+      statuses: ['Inward', 'Outward'],
+      users: users.map(u => u.name)
+    });
+  } catch (error) {
+    console.error('Get report filter options error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/reports/search
+app.get('/api/reports/search', async (req, res) => {
+  try {
+    const {
+      dateFrom,
+      dateTo,
+      partyName,
+      product,
+      status,
+      transNoFrom,
+      transNoTo,
+      vehicleNo,
+      fwUser,
+      swUser,
+      firstDateWise
+    } = req.query;
+
+    let query = 'SELECT * FROM weighbridge_sessions WHERE 1=1';
+    const params = [];
+
+    if (dateFrom) {
+      query += ' AND (DATE(first_weight_time) >= ? OR (first_weight_time IS NULL AND DATE(created_at) >= ?))';
+      params.push(dateFrom, dateFrom);
+    }
+    if (dateTo) {
+      query += ' AND (DATE(first_weight_time) <= ? OR (first_weight_time IS NULL AND DATE(created_at) <= ?))';
+      params.push(dateTo, dateTo);
+    }
+    if (partyName && partyName !== 'all') {
+      query += ' AND party_name = ?';
+      params.push(partyName);
+    }
+    if (product && product !== 'all') {
+      query += ' AND material = ?';
+      params.push(product);
+    }
+    if (status && status !== 'all') {
+      query += ' AND status = ?';
+      params.push(status);
+    }
+    if (transNoFrom) {
+      query += ' AND transaction_no >= ?';
+      params.push(parseInt(transNoFrom));
+    }
+    if (transNoTo) {
+      query += ' AND transaction_no <= ?';
+      params.push(parseInt(transNoTo));
+    }
+    if (vehicleNo) {
+      query += ' AND vehicle_reg_no LIKE ?';
+      params.push(`%${vehicleNo}%`);
+    }
+    if (fwUser && fwUser !== 'all') {
+      query += ' AND (fw_user = ? OR operator_name = ?)';
+      params.push(fwUser, fwUser);
+    }
+    if (swUser && swUser !== 'all') {
+      query += ' AND sw_user = ?';
+      params.push(swUser);
+    }
+
+    if (firstDateWise === 'true' || firstDateWise === true || firstDateWise === '1') {
+      query += ' ORDER BY COALESCE(first_weight_time, created_at) ASC, transaction_no ASC';
+    } else {
+      query += ' ORDER BY transaction_no DESC';
+    }
+
+    query += ' LIMIT 500';
+
+    const [rows] = await pool.query(query, params);
+    const data = rows.map(mapRowTo47Fields);
+
+    res.json({
+      success: true,
+      count: data.length,
+      data
+    });
+  } catch (error) {
+    console.error('Reports search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/reports/party-totals
+app.get('/api/reports/party-totals', async (req, res) => {
+  try {
+    const {
+      dateFrom,
+      dateTo,
+      partyName,
+      product,
+      status,
+      transNoFrom,
+      transNoTo,
+      vehicleNo
+    } = req.query;
+
+    let whereClause = ' WHERE 1=1';
+    const params = [];
+
+    if (dateFrom) {
+      whereClause += ' AND (DATE(first_weight_time) >= ? OR (first_weight_time IS NULL AND DATE(created_at) >= ?))';
+      params.push(dateFrom, dateFrom);
+    }
+    if (dateTo) {
+      whereClause += ' AND (DATE(first_weight_time) <= ? OR (first_weight_time IS NULL AND DATE(created_at) <= ?))';
+      params.push(dateTo, dateTo);
+    }
+    if (partyName && partyName !== 'all') {
+      whereClause += ' AND party_name = ?';
+      params.push(partyName);
+    }
+    if (product && product !== 'all') {
+      whereClause += ' AND material = ?';
+      params.push(product);
+    }
+    if (status && status !== 'all') {
+      whereClause += ' AND status = ?';
+      params.push(status);
+    }
+    if (transNoFrom) {
+      whereClause += ' AND transaction_no >= ?';
+      params.push(parseInt(transNoFrom));
+    }
+    if (transNoTo) {
+      whereClause += ' AND transaction_no <= ?';
+      params.push(parseInt(transNoTo));
+    }
+    if (vehicleNo) {
+      whereClause += ' AND vehicle_reg_no LIKE ?';
+      params.push(`%${vehicleNo}%`);
+    }
+
+    const query = `
+      SELECT 
+        COALESCE(party_name, 'Unspecified Party') AS partyName,
+        COUNT(*) AS totalTransactions,
+        COALESCE(SUM(first_weight), 0) AS totalFirstWeight,
+        COALESCE(SUM(second_weight), 0) AS totalSecondWeight,
+        COALESCE(SUM(net_weight), 0) AS totalNetWeight,
+        COALESCE(SUM(deduction), 0) AS totalDeduction,
+        COALESCE(SUM(less_weight), 0) AS totalLessWeight,
+        COALESCE(SUM(final_weight), 0) AS totalFinalWeight,
+        COALESCE(SUM(charges), 0) AS totalCharges,
+        COALESCE(SUM(chess_amount), 0) AS totalChessAmount,
+        COALESCE(SUM(total_amount), 0) AS totalAmount
+      FROM weighbridge_sessions
+      ${whereClause}
+      GROUP BY party_name
+      ORDER BY totalAmount DESC, partyName ASC
+    `;
+
+    const [rows] = await pool.query(query, params);
+
+    const grandTotals = rows.reduce(
+      (acc, r) => ({
+        totalTransactions: acc.totalTransactions + parseInt(r.totalTransactions || 0),
+        totalFirstWeight: acc.totalFirstWeight + parseFloat(r.totalFirstWeight || 0),
+        totalSecondWeight: acc.totalSecondWeight + parseFloat(r.totalSecondWeight || 0),
+        totalNetWeight: acc.totalNetWeight + parseFloat(r.totalNetWeight || 0),
+        totalDeduction: acc.totalDeduction + parseFloat(r.totalDeduction || 0),
+        totalLessWeight: acc.totalLessWeight + parseFloat(r.totalLessWeight || 0),
+        totalFinalWeight: acc.totalFinalWeight + parseFloat(r.totalFinalWeight || 0),
+        totalCharges: acc.totalCharges + parseFloat(r.totalCharges || 0),
+        totalChessAmount: acc.totalChessAmount + parseFloat(r.totalChessAmount || 0),
+        totalAmount: acc.totalAmount + parseFloat(r.totalAmount || 0)
+      }),
+      {
+        totalTransactions: 0,
+        totalFirstWeight: 0,
+        totalSecondWeight: 0,
+        totalNetWeight: 0,
+        totalDeduction: 0,
+        totalLessWeight: 0,
+        totalFinalWeight: 0,
+        totalCharges: 0,
+        totalChessAmount: 0,
+        totalAmount: 0
+      }
+    );
+
+    res.json({
+      success: true,
+      partyTotals: rows.map(r => ({
+        partyName: r.partyName,
+        totalTransactions: parseInt(r.totalTransactions || 0),
+        totalFirstWeight: parseFloat(r.totalFirstWeight || 0),
+        totalSecondWeight: parseFloat(r.totalSecondWeight || 0),
+        totalNetWeight: parseFloat(r.totalNetWeight || 0),
+        totalDeduction: parseFloat(r.totalDeduction || 0),
+        totalLessWeight: parseFloat(r.totalLessWeight || 0),
+        totalFinalWeight: parseFloat(r.totalFinalWeight || 0),
+        totalCharges: parseFloat(r.totalCharges || 0),
+        totalChessAmount: parseFloat(r.totalChessAmount || 0),
+        totalAmount: parseFloat(r.totalAmount || 0)
+      })),
+      grandTotals
+    });
+  } catch (error) {
+    console.error('Party totals error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/reports/transaction/:id (For Weighment F5 Print)
+app.get('/api/reports/transaction/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const isNumeric = /^\d+$/.test(id);
+    let rows;
+    if (isNumeric) {
+      [rows] = await pool.query(
+        'SELECT * FROM weighbridge_sessions WHERE transaction_no = ? OR session_id = ? LIMIT 1',
+        [parseInt(id), id]
+      );
+    } else {
+      [rows] = await pool.query(
+        'SELECT * FROM weighbridge_sessions WHERE session_id = ? LIMIT 1',
+        [id]
+      );
+    }
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    const row = rows[0];
+    const mapped = mapRowTo47Fields(row);
+
+    const [configs] = await pool.query(
+      `SELECT s_no AS sNo, field_key AS fieldKey, field_name AS fieldName, 
+              is_selected AS isSelected, display_order AS displayOrder
+       FROM report_field_configs
+       WHERE user_id = 'default' AND report_type = 'weighment_report' AND is_selected = TRUE
+       ORDER BY display_order ASC`
+    );
+
+    const [companyRows] = await pool.query('SELECT * FROM company_settings LIMIT 1');
+    const company = companyRows.length > 0 ? companyRows[0] : {};
+
+    res.json({
+      success: true,
+      transaction: mapped,
+      rawSession: formatWeighbridgeSession(row),
+      fieldConfigs: configs,
+      company: {
+        companyName: company.company_name || 'Aparna RMC Ltd.',
+        firmName: company.firm_name || 'Aparna RMC',
+        plantName: company.plant_name || 'Plant 1 - Main Batching Yard',
+        plantCode: company.plant_code || 'PLANT_001',
+        tagline: company.tagline || 'Certified Electronic Weighbridge & Automated Concrete Dispatch',
+        address: company.address || '',
+        city: company.city || 'Pune',
+        pincode: company.pincode || '411057',
+        phone: company.phone || '+91 20 2712 8899',
+        gstin: company.gstin || '27AAAAA0000A1Z5',
+        weighbridgeLicense: company.weighbridge_license || 'WB/2026/RMC-449',
+        scaleModel: company.scale_model || 'Avery Weigh-Tronix E1205',
+        scaleCapacity: company.scale_capacity || '100 MT',
+      }
+    });
+  } catch (error) {
+    console.error('Get transaction report details error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3078,6 +4817,75 @@ app.put('/api/invoices/:id', async (req, res) => {
     const b = req.body;
     const updates = [];
     const params = [];
+
+    if (b.customerName !== undefined || b.customer_name !== undefined) {
+      updates.push('customer_name = ?');
+      params.push(b.customerName || b.customer_name);
+    }
+    if (b.customerId !== undefined || b.customer_id !== undefined) {
+      updates.push('customer_id = ?');
+      params.push(b.customerId || b.customer_id);
+    }
+    if (b.customerAddress !== undefined || b.customer_address !== undefined) {
+      updates.push('customer_address = ?');
+      params.push(b.customerAddress || b.customer_address || null);
+    }
+    if (b.customerEmail !== undefined || b.customer_email !== undefined) {
+      updates.push('customer_email = ?');
+      params.push(b.customerEmail || b.customer_email || null);
+    }
+    if (b.customerPhone !== undefined || b.customer_phone !== undefined) {
+      updates.push('customer_phone = ?');
+      params.push(b.customerPhone || b.customer_phone || null);
+    }
+    if (b.customerGST !== undefined || b.customer_gst !== undefined) {
+      updates.push('customer_gst = ?');
+      params.push(b.customerGST || b.customer_gst || null);
+    }
+    if (b.items !== undefined) {
+      updates.push('items = ?');
+      params.push(JSON.stringify(b.items || []));
+    }
+    if (b.tripIds !== undefined || b.trip_ids !== undefined) {
+      updates.push('trip_ids = ?');
+      params.push(JSON.stringify(b.tripIds || b.trip_ids || []));
+    }
+    if (b.subtotal !== undefined) {
+      updates.push('subtotal = ?');
+      params.push(b.subtotal);
+    }
+    if (b.taxAmount !== undefined || b.tax_amount !== undefined) {
+      updates.push('tax_amount = ?');
+      params.push(b.taxAmount ?? b.tax_amount ?? 0);
+    }
+    if (b.discountAmount !== undefined || b.discount_amount !== undefined) {
+      updates.push('discount_amount = ?');
+      params.push(b.discountAmount ?? b.discount_amount ?? 0);
+    }
+    if (b.totalAmount !== undefined || b.total_amount !== undefined) {
+      updates.push('total_amount = ?');
+      params.push(b.totalAmount ?? b.total_amount ?? 0);
+    }
+    if (b.paidAmount !== undefined || b.paid_amount !== undefined) {
+      updates.push('paid_amount = ?');
+      params.push(b.paidAmount ?? b.paid_amount ?? 0);
+    }
+    if (b.balanceAmount !== undefined || b.balance_amount !== undefined) {
+      updates.push('balance_amount = ?');
+      params.push(b.balanceAmount ?? b.balance_amount ?? 0);
+    }
+    if (b.dueDate !== undefined || b.due_date !== undefined) {
+      updates.push('due_date = ?');
+      params.push(b.dueDate || b.due_date);
+    }
+    if (b.notes !== undefined) {
+      updates.push('notes = ?');
+      params.push(b.notes || null);
+    }
+    if (b.terms !== undefined) {
+      updates.push('terms = ?');
+      params.push(b.terms || null);
+    }
     if (b.status !== undefined) {
       updates.push('status = ?');
       params.push(b.status);
@@ -3085,9 +4893,7 @@ app.put('/api/invoices/:id', async (req, res) => {
         updates.push('paid_date = CURDATE()');
       }
     }
-    if (b.notes !== undefined) { updates.push('notes = ?'); params.push(b.notes); }
-    if (b.paidAmount !== undefined) { updates.push('paid_amount = ?'); params.push(b.paidAmount); }
-    if (b.balanceAmount !== undefined) { updates.push('balance_amount = ?'); params.push(b.balanceAmount); }
+
     if (updates.length === 0) return res.status(400).json({ error: 'No fields to update' });
     updates.push('updated_at = NOW()');
     params.push(req.params.id);
@@ -3118,6 +4924,18 @@ function formatAuditLog(row) {
     try { return typeof v === 'string' ? JSON.parse(v) : (v || def); } catch (e) { return def; }
   };
 
+  let performedBy = parseJson(row.performed_by, null);
+  if (!performedBy || typeof performedBy !== 'object') {
+    const rawName = row.performed_by || row.user_name || 'System Operator';
+    performedBy = { id: row.user_id || 'SYS', name: String(rawName), role: 'operator' };
+  } else {
+    performedBy = {
+      id: performedBy.id || 'SYS',
+      name: performedBy.name || 'System Operator',
+      role: performedBy.role || 'operator',
+    };
+  }
+
   return {
     id: row.id,
     timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
@@ -3125,7 +4943,7 @@ function formatAuditLog(row) {
     action: row.action || 'UPDATE',
     entityId: row.entity_id || '',
     entityType: row.entity_type || '',
-    performedBy: parseJson(row.performed_by, { id: 'SYS', name: 'System Operator', role: 'operator' }),
+    performedBy,
     details: row.details || '',
     severity: row.severity || 'info',
     previousState: parseJson(row.previous_state, null),
@@ -3571,23 +5389,23 @@ function formatCompanySettings(row) {
 
   return {
     id: row.id || 'default_company',
-    companyName: row.company_name || 'Dharani Cotton Mills / Aparna RMC Ltd.',
-    firmName: row.firm_name || 'Dharani Cotton Mills',
+    companyName: row.company_name || 'Dharani Cottons',
+    firmName: row.firm_name || 'DHARANI COTTON MILLS',
     plantName: row.plant_name || 'Plant 1 - Main Batching Yard',
     plantCode: row.plant_code || 'PLANT_001',
     tagline: row.tagline || 'Certified Electronic Weighbridge & Automated Concrete Dispatch',
     logoUrl: row.logo_url || '',
-    address: row.address || '',
-    city: row.city || 'Pune',
-    state: row.state || 'Maharashtra',
-    pincode: row.pincode || '411057',
+    address: row.address || 'Vikarabad',
+    city: row.city || 'Hyderabad',
+    state: row.state || 'Telangana',
+    pincode: row.pincode || '500033',
     phone: row.phone || '+91 20 2712 8899',
-    email: row.email || 'weighbridge@dharanimills.com',
-    website: row.website || 'https://www.dharanimills.com',
+    email: row.email || 'weighbridge@dharani.com',
+    website: row.website || 'https://www.dharani.com',
     gstin: row.gstin || '27AAAAA0000A1Z5',
     weighbridgeLicense: row.weighbridge_license || 'WB/2026/RMC-449',
-    scaleModel: row.scale_model || 'Avery Weigh-Tronix E1205',
-    scaleCapacity: row.scale_capacity || '100 MT',
+    scaleModel: row.scale_model || 'VENTEK VMS-WB',
+    scaleCapacity: row.scale_capacity || '50,000 kg (50 MT)',
     scaleDivision: row.scale_division || '10 kg',
     currency: row.currency || '₹',
     weighbridgeDefaults,
@@ -3743,6 +5561,36 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 });
 
+// Ensure MediaMTX RTSP-to-HLS Gateway is running
+function checkAndStartMediaMtx() {
+  const tester = net.createConnection({ port: 8888, host: '127.0.0.1' }, () => {
+    tester.destroy();
+    console.log('✅ MediaMTX HLS Gateway is active on port 8888');
+  });
+
+  tester.on('error', () => {
+    tester.destroy();
+    const exePath = path.resolve(__dirname, '..', 'mediamtx.exe');
+    const ymlPath = path.resolve(__dirname, '..', 'mediamtx.yml');
+    if (fs.existsSync(exePath)) {
+      console.log('🔄 Spawning MediaMTX HLS Gateway from', exePath);
+      try {
+        const child = spawn(exePath, ['mediamtx.yml'], {
+          cwd: path.resolve(__dirname, '..'),
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+      } catch (err) {
+        console.warn('Could not auto-start mediamtx.exe:', err.message);
+      }
+    }
+  });
+}
+
+// Periodically supervise MediaMTX every 15 seconds
+setInterval(checkAndStartMediaMtx, 15000);
+
 // Start server
 async function startServer() {
   // Test database connection
@@ -3752,11 +5600,24 @@ async function startServer() {
     // Initialize database tables
     await initializeDatabase();
   }
+
+  // Ensure camera streaming proxy is online
+  checkAndStartMediaMtx();
+  
+  // Start Ventek Weighbridge serial integration service
+  ventekSerialService.start();
+  
+  // Start FTP ANPR camera watcher
+  ftpAnprWatcher.start();
+  
+  // Start automated Edge-to-Server MySQL Synchronization Service (Every 5 minutes)
+  await cloudSyncService.initialize();
   
   app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`);
     console.log(`📊 API endpoints available at http://localhost:${PORT}/api`);
     console.log(`🎯 ANPR endpoints available at http://localhost:${PORT}/api/anpr`);
+    console.log(`🔄 Edge-to-Server MySQL Sync active on 5-min schedule (Target: ${cloudSyncService.remoteDatabase} @ ${cloudSyncService.remoteHost})`);
     if (!connected) {
       console.log('⚠️  Warning: Database connection failed. Please check MySQL configuration.');
     }

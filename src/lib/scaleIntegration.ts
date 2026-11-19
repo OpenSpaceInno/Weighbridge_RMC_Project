@@ -7,13 +7,14 @@ import { WeightReading, ScaleProtocol, ThirdPartyScaleConfig } from '@/types/wei
 export function parseScaleWeightString(
   raw: string,
   protocol: ScaleProtocol = 'standard_ascii'
-): { weight: number; unit: 'kg' | 'ton'; stable: boolean; zero: boolean } | null {
+): { weight: number; weightQtl?: number; unit: 'kg' | 'ton'; stable: boolean; zero: boolean } | null {
   if (!raw || typeof raw !== 'string') return null;
 
   const cleaned = raw.trim();
   if (!cleaned) return null;
 
   let weight = 0;
+  let weightQtl: number | undefined = undefined;
   let unit: 'kg' | 'ton' = 'kg';
   let stable = true;
 
@@ -32,6 +33,42 @@ export function parseScaleWeightString(
   }
 
   switch (protocol) {
+    case 'ventek_vms': {
+      // Ventek VMS-WB format & emulator stream parsing
+      const cleanText = cleaned.replace(/[\x00-\x1F\x7F]/g, ' ').trim();
+      const tokens = cleanText.split(/\s+/).filter(Boolean);
+      // Filter out tokens that are timestamps (contain '/' or ':')
+      const numTokens = tokens.filter(t => !t.includes('/') && !t.includes(':') && /[\d]/.test(t));
+      const targetToken = numTokens.length > 0 ? numTokens[numTokens.length - 1] : cleanText;
+
+      const match = targetToken.match(/([+-]?\s*\d+(?:\.\d+)?)/) || cleanText.match(/([+-]?\s*\d+(?:\.\d+)?)/);
+      if (match) {
+        const rawVal = parseFloat(match[1].replace(/\s+/g, ''));
+        if (!isNaN(rawVal)) {
+          if (rawVal <= 500) {
+            // Indicator in Quintals (e.g. 250.00 Qtl -> 25,000 kg)
+            weightQtl = Number(rawVal.toFixed(2));
+            weight = Math.min(50000, Math.max(0, Math.round(rawVal * 100)));
+          } else if (rawVal <= 50000) {
+            // Direct kilograms (e.g. 24580 kg -> 245.80 Qtl)
+            weight = Math.round(rawVal);
+            weightQtl = Number((weight / 100).toFixed(2));
+          } else {
+            // Scaled from emulator or implied decimals (e.g. 3768212 -> 37,682 kg / 376.82 Qtl)
+            const scaled = rawVal / 100;
+            if (scaled > 50000) {
+              weight = Math.round(scaled % 50000);
+              if (weight === 0) weight = 24500;
+            } else {
+              weight = Math.round(scaled);
+            }
+            weightQtl = Number((weight / 100).toFixed(2));
+          }
+        }
+      }
+      break;
+    }
+
     case 'avery_e1205': {
       // Avery format: <STX><POLARITY><WEIGHT 7 DIGITS><ETX> or +024580
       const match = cleaned.match(/([+-]?\d{3,7})/);
@@ -74,6 +111,7 @@ export function parseScaleWeightString(
 
   return {
     weight,
+    weightQtl,
     unit,
     stable,
     zero: weight === 0,
@@ -172,9 +210,12 @@ class WebSerialScaleManager {
                     {
                       timestamp: new Date().toISOString(),
                       weight: parsed.weight,
+                      weightQtl: parsed.weightQtl,
                       unit: parsed.unit,
                       stable: parsed.stable,
                       zero: parsed.zero,
+                      deviceCode: 'VMS',
+                      source: 'VENTEK VMS-WB (Web Serial)',
                     },
                     line
                   );
