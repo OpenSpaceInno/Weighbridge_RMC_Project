@@ -18,6 +18,7 @@ public/snapshots/*.jpg
 public/snapshots/*.jpeg
 public/snapshots/*.png
 !public/snapshots/.gitkeep
+server/temp_sync/
 
 # Editor directories and files
 .vscode/*

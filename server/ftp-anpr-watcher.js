@@ -212,13 +212,18 @@ class FtpAnprWatcher {
         secure: this.demoConfig.secure,
       });
 
-      if (this.demoConfig.remoteDir && this.demoConfig.remoteDir !== '/' && this.demoConfig.remoteDir !== '.') {
-        await destClient.ensureDir(this.demoConfig.remoteDir);
+      let targetDir = this.demoConfig.remoteDir || '/Dharani';
+      if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
+      try {
+        await destClient.cd(targetDir);
+      } catch {
+        await destClient.ensureDir(targetDir);
+        try { await destClient.cd(targetDir); } catch {}
       }
 
-      // Upload to Dharani folder
+      // Upload directly into /Dharani folder for demo user
       await destClient.uploadFrom(tempFile, fileName);
-      console.log(`✅ [FTP Mirror] Copied camera image to /Dharani/${fileName}`);
+      console.log(`✅ [FTP Mirror] Copied camera image to demo user /Dharani/${fileName}`);
       return true;
     } catch (err) {
       console.warn(`[FTP Mirror] Failed to mirror ${fileName} to Dharani:`, err.message);
@@ -319,7 +324,7 @@ class FtpAnprWatcher {
           continue;
         }
 
-        // Find newly uploaded files
+        // Find newly uploaded files with detected plate
         const newFiles = detectedFiles.filter(f => !this.processedFiles.has(f.fileName));
 
         for (const newFile of newFiles) {
@@ -329,18 +334,17 @@ class FtpAnprWatcher {
           // 1. Immediately mirror/copy image into demo's /Dharani folder so user sees it in FTP portal!
           await this.mirrorToDharani(newFile.remotePath, newFile.fileName);
 
-          // 2. Also mirror matching overview detection image if available
-          for (const [key, ovName] of overviewFiles.entries()) {
-            if (!this.processedFiles.has(ovName)) {
-              this.processedFiles.add(ovName);
-              const ovRemotePath = remoteDir === '/' ? ovName : `${remoteDir}/${ovName}`;
-              await this.mirrorToDharani(ovRemotePath, ovName);
-              break;
-            }
-          }
-
-          // 3. Save into MySQL anpr_events & set latestDetection for Weighbridge auto-population
+          // 2. Save into MySQL anpr_events & set latestDetection for Weighbridge auto-population
           await this.recordDetectionToDb(newFile);
+        }
+
+        // Also mirror all newly uploaded overview detection images into demo's /Dharani
+        for (const [key, ovName] of overviewFiles.entries()) {
+          if (!this.processedFiles.has(ovName)) {
+            this.processedFiles.add(ovName);
+            const ovRemotePath = remoteDir === '/' ? ovName : `${remoteDir}/${ovName}`;
+            await this.mirrorToDharani(ovRemotePath, ovName);
+          }
         }
       }
 
@@ -367,8 +371,13 @@ class FtpAnprWatcher {
         secure: this.demoConfig.secure,
       });
 
-      if (this.demoConfig.remoteDir && this.demoConfig.remoteDir !== '/' && this.demoConfig.remoteDir !== '.') {
-        await client.ensureDir(this.demoConfig.remoteDir);
+      let targetDir = this.demoConfig.remoteDir || '/Dharani';
+      if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
+      try {
+        await client.cd(targetDir);
+      } catch {
+        await client.ensureDir(targetDir);
+        try { await client.cd(targetDir); } catch {}
       }
 
       const fileList = await client.list();
@@ -541,8 +550,13 @@ class FtpAnprWatcher {
         secure: this.demoConfig.secure,
       });
 
-      if (this.demoConfig.remoteDir && this.demoConfig.remoteDir !== '/' && this.demoConfig.remoteDir !== '.') {
-        await client.ensureDir(this.demoConfig.remoteDir);
+      let targetDir = this.demoConfig.remoteDir || '/Dharani';
+      if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
+      try {
+        await client.cd(targetDir);
+      } catch {
+        await client.ensureDir(targetDir);
+        try { await client.cd(targetDir); } catch {}
       }
 
       const fileList = await client.list();

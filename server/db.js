@@ -279,9 +279,54 @@ async function initializeDatabase() {
     `);
 
     await dbConnection.query(`
-      INSERT INTO company_settings (id, company_name, firm_name, plant_name, plant_code)
-      VALUES ('default_company', 'Dharani Cotton Mills', 'Dharani Cotton Mills', 'Plant 1 - Main Batching Yard', 'PLANT_001')
-      ON DUPLICATE KEY UPDATE company_name='Dharani Cotton Mills', firm_name='Dharani Cotton Mills'
+      INSERT INTO company_settings (id, company_name, firm_name, plant_name, plant_code, weighbridge_defaults)
+      VALUES (
+        'default_company',
+        'Dharani Cotton Mills',
+        'Dharani Cotton Mills',
+        'Plant 1 - Main Batching Yard',
+        'PLANT_001',
+        JSON_OBJECT(
+          'defaultRate', 7520,
+          'defaultMoisture', 8,
+          'defaultDeduction', 50,
+          'defaultCharges', 250,
+          'printDuplicate', false,
+          'printQrCode', true,
+          'printImages', true,
+          'autoWeighInterval', 600,
+          'minTareWeight', 5000,
+          'maxGrossWeight', 60000,
+          'ftp', JSON_OBJECT(
+            'enabled', true,
+            'host', 'ftp.activitsol.com',
+            'port', 2121,
+            'user', 'demo',
+            'password', 'Password@123',
+            'secure', false,
+            'remoteDir', '/Dharani'
+          )
+        )
+      )
+      ON DUPLICATE KEY UPDATE 
+        company_name='Dharani Cotton Mills',
+        firm_name='Dharani Cotton Mills',
+        weighbridge_defaults = CASE 
+          WHEN weighbridge_defaults IS NULL OR JSON_EXTRACT(weighbridge_defaults, '$.ftp.host') = '192.168.0.15' OR JSON_EXTRACT(weighbridge_defaults, '$.ftp.user') = 'weighbridge'
+          THEN JSON_SET(
+            COALESCE(weighbridge_defaults, JSON_OBJECT()),
+            '$.ftp', JSON_OBJECT(
+              'enabled', true,
+              'host', 'ftp.activitsol.com',
+              'port', 2121,
+              'user', 'demo',
+              'password', 'Password@123',
+              'secure', false,
+              'remoteDir', '/Dharani'
+            )
+          )
+          ELSE weighbridge_defaults
+        END;
     `);
 
     // Create anpr_events table

@@ -81,13 +81,13 @@ export const CompanySettings: React.FC = () => {
       weighbridgeDefaults: {
         ...prev.weighbridgeDefaults,
         ftp: {
-          enabled: false,
-          host: '192.168.0.15',
-          port: 21,
-          user: 'weighbridge',
-          password: '',
+          enabled: true,
+          host: 'ftp.activitsol.com',
+          port: 2121,
+          user: 'demo',
+          password: 'Password@123',
           secure: false,
-          remoteDir: '/snapshots',
+          remoteDir: '/Dharani',
           ...(prev.weighbridgeDefaults?.ftp || {}),
           [field]: value,
         },
@@ -1010,7 +1010,7 @@ export const CompanySettings: React.FC = () => {
                         type="text"
                         value={formData.weighbridgeDefaults?.ftp?.host || ''}
                         onChange={(e) => handleFtpChange('host', e.target.value)}
-                        placeholder="e.g. 192.168.0.15 or ftp.rmcplant.com"
+                        placeholder="ftp.activitsol.com"
                         className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-xs font-mono text-slate-900 dark:text-white"
                       />
                     </div>
@@ -1021,8 +1021,8 @@ export const CompanySettings: React.FC = () => {
                       </label>
                       <input
                         type="number"
-                        value={formData.weighbridgeDefaults?.ftp?.port || 21}
-                        onChange={(e) => handleFtpChange('port', parseInt(e.target.value) || 21)}
+                        value={formData.weighbridgeDefaults?.ftp?.port || 2121}
+                        onChange={(e) => handleFtpChange('port', parseInt(e.target.value) || 2121)}
                         className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-xs font-mono text-slate-900 dark:text-white"
                       />
                     </div>
@@ -1037,7 +1037,7 @@ export const CompanySettings: React.FC = () => {
                         type="text"
                         value={formData.weighbridgeDefaults?.ftp?.user || ''}
                         onChange={(e) => handleFtpChange('user', e.target.value)}
-                        placeholder="e.g. weighbridge"
+                        placeholder="demo"
                         className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-xs text-slate-900 dark:text-white"
                       />
                     </div>
@@ -1051,7 +1051,7 @@ export const CompanySettings: React.FC = () => {
                           type={showFtpPassword ? 'text' : 'password'}
                           value={formData.weighbridgeDefaults?.ftp?.password || ''}
                           onChange={(e) => handleFtpChange('password', e.target.value)}
-                          placeholder="FTP password"
+                          placeholder="Password@123"
                           className="w-full px-3 py-1.5 pr-8 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-xs text-slate-900 dark:text-white"
                         />
                         <button
@@ -1070,9 +1070,9 @@ export const CompanySettings: React.FC = () => {
                       </label>
                       <input
                         type="text"
-                        value={formData.weighbridgeDefaults?.ftp?.remoteDir || '/snapshots'}
+                        value={formData.weighbridgeDefaults?.ftp?.remoteDir || '/Dharani'}
                         onChange={(e) => handleFtpChange('remoteDir', e.target.value)}
-                        placeholder="/snapshots"
+                        placeholder="/Dharani"
                         className="w-full px-3 py-1.5 bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded text-xs font-mono text-slate-900 dark:text-white"
                       />
                     </div>
