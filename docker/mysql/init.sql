@@ -114,11 +114,11 @@ CREATE TABLE `device_ftp_config` (
   `sftp_port` int DEFAULT '2222',
   `username` varchar(128) NOT NULL,
   `password` varchar(255) NOT NULL,
-  `camera_user` varchar(128) DEFAULT 'sarath',
+  `camera_user` varchar(128) DEFAULT 'demo',
   `camera_password` varchar(255) DEFAULT 'Password@123',
   `admin_user` varchar(128) DEFAULT 'ftpsuperadmin',
   `admin_password` varchar(255) DEFAULT 'Demo#Test@2026',
-  `remote_folder` varchar(255) DEFAULT '/weighbridge',
+  `remote_folder` varchar(255) DEFAULT '/Dharani',
   `web_admin_url` varchar(512) DEFAULT NULL,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
@@ -131,7 +131,7 @@ CREATE TABLE `device_ftp_config` (
 
 LOCK TABLES `device_ftp_config` WRITE;
 /*!40000 ALTER TABLE `device_ftp_config` DISABLE KEYS */;
-INSERT INTO `device_ftp_config` VALUES ('default','213.210.37.249','http://sftpgo-zkiu7thmtlpwpdojnucvhahr.213.210.37.249.sslip.io/api/v2',2121,2222,'aparna_rmc','Rmc@Aparna#2026','sarath','Password@123','ftpsuperadmin','Demo#Test@2026','/weighbridge','http://sftpgo-zkiu7thmtlpwpdojnucvhahr.213.210.37.249.sslip.io/web/admin/users','2026-11-10 13:09:30');
+INSERT INTO `device_ftp_config` VALUES ('default','ftp.activitsol.com','http://sftpgo-zkiu7thmtlpwpdojnucvhahr.213.210.37.249.sslip.io/api/v2',2121,2222,'demo','Password@123','demo','Password@123','ftpsuperadmin','Demo#Test@2026','/Dharani','http://sftpgo-zkiu7thmtlpwpdojnucvhahr.213.210.37.249.sslip.io/web/admin/users','2026-11-19 12:00:00');
 /*!40000 ALTER TABLE `device_ftp_config` ENABLE KEYS */;
 UNLOCK TABLES;
 

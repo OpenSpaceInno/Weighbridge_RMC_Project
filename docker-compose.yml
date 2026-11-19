@@ -50,10 +50,6 @@ services:
       - FTP_PASSWORD=${FTP_PASSWORD:-Password@123}
       - FTP_DIR=${FTP_DIR:-/Dharani}
       - FTP_ENABLED=true
-      - FTP_CAMERA_HOST=${FTP_CAMERA_HOST:-ftp.activitsol.com}
-      - FTP_CAMERA_PORT=${FTP_CAMERA_PORT:-2121}
-      - FTP_CAMERA_USER=${FTP_CAMERA_USER:-sarath}
-      - FTP_CAMERA_PASSWORD=${FTP_CAMERA_PASSWORD:-Password@123}
     volumes:
       - rmc_snapshots:/app/public/snapshots
     depends_on:

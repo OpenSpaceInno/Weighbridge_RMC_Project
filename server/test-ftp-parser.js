@@ -6,14 +6,14 @@ async function testParser() {
 
   try {
     await client.access({
-      host: '213.210.37.249',
+      host: 'ftp.activitsol.com',
       port: 2121,
-      user: 'sarath',
+      user: 'demo',
       password: 'Password@123',
       secure: false
     });
 
-    const list = await client.list('/Plant 01 - Shamshabad Central/Entry Gate');
+    const list = await client.list('/Dharani');
     console.log(`Fetched ${list.length} files from FTP`);
 
     const plateRegex = /^(?:Unkown|[A-Za-z0-9]+)_([A-Z0-9]{4,15})\(CH(\d+)_(\d{4})_(\d{2})_(\d{2})_(\d{2})(\d{2})(\d{2})\)\.jpg$/i;

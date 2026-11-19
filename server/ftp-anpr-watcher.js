@@ -13,24 +13,14 @@ if (!fs.existsSync(tempDir)) {
 
 class FtpAnprWatcher {
   constructor() {
-    // Demo user (target folder /Dharani for user storage & web view)
-    this.demoConfig = {
+    // Single, dedicated FTP configuration for user demo and target folder /Dharani
+    this.ftpConfig = {
       host: process.env.FTP_HOST || 'ftp.activitsol.com',
       port: parseInt(process.env.FTP_PORT || '2121', 10),
       user: process.env.FTP_USER || 'demo',
       password: process.env.FTP_PASSWORD || 'Password@123',
       secure: false,
       remoteDir: process.env.FTP_DIR || '/Dharani',
-    };
-
-    // Camera user (where physical camera 192.168.0.101 uploads)
-    this.cameraConfig = {
-      host: process.env.FTP_CAMERA_HOST || 'ftp.activitsol.com',
-      port: parseInt(process.env.FTP_CAMERA_PORT || '2121', 10),
-      user: process.env.FTP_CAMERA_USER || 'sarath',
-      password: process.env.FTP_CAMERA_PASSWORD || 'Password@123',
-      secure: false,
-      remoteDirs: ['/', '/Plant 01 - Shamshabad Central/Entry Gate'],
     };
 
     this.pollIntervalMs = 3000;
@@ -73,11 +63,12 @@ class FtpAnprWatcher {
    * Start the background FTP watcher
    */
   async start() {
-    console.log(`[FTP ANPR] Starting Dual-Sync FTP Watcher:`);
-    console.log(`  Source (Camera): ${this.cameraConfig.host}:${this.cameraConfig.port} (User: ${this.cameraConfig.user})`);
-    console.log(`  Target (Dharani): ${this.demoConfig.host}:${this.demoConfig.port}${this.demoConfig.remoteDir} (User: ${this.demoConfig.user})`);
-    
-    // Initial baseline scan of existing files
+    console.log(`[FTP ANPR] Starting Dedicated FTP Watcher:`);
+    console.log(`  Host: ${this.ftpConfig.host}:${this.ftpConfig.port}`);
+    console.log(`  User: ${this.ftpConfig.user}`);
+    console.log(`  Target Folder: ${this.ftpConfig.remoteDir}`);
+
+    // Initial baseline scan of existing files in /Dharani
     try {
       await this.poll(true);
     } catch (err) {
@@ -180,198 +171,28 @@ class FtpAnprWatcher {
   }
 
   /**
-   * Helper: Mirror/copy a file from camera account (sarath) to user demo account (/Dharani)
-   */
-  async mirrorToDharani(remoteSourcePath, fileName) {
-    const srcClient = new ftp.Client();
-    const destClient = new ftp.Client();
-    srcClient.ftp.verbose = false;
-    destClient.ftp.verbose = false;
-
-    const tempFile = path.join(tempDir, `sync_${Date.now()}_${fileName}`);
-
-    try {
-      // Connect to source
-      await srcClient.access({
-        host: this.cameraConfig.host,
-        port: this.cameraConfig.port,
-        user: this.cameraConfig.user,
-        password: this.cameraConfig.password,
-        secure: this.cameraConfig.secure,
-      });
-
-      // Download file locally to temp
-      await srcClient.downloadTo(tempFile, remoteSourcePath);
-
-      // Connect to destination
-      await destClient.access({
-        host: this.demoConfig.host,
-        port: this.demoConfig.port,
-        user: this.demoConfig.user,
-        password: this.demoConfig.password,
-        secure: this.demoConfig.secure,
-      });
-
-      let targetDir = this.demoConfig.remoteDir || '/Dharani';
-      if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
-      try {
-        await destClient.cd(targetDir);
-      } catch {
-        await destClient.ensureDir(targetDir);
-        try { await destClient.cd(targetDir); } catch {}
-      }
-
-      // Upload directly into /Dharani folder for demo user
-      await destClient.uploadFrom(tempFile, fileName);
-      console.log(`✅ [FTP Mirror] Copied camera image to demo user /Dharani/${fileName}`);
-      return true;
-    } catch (err) {
-      console.warn(`[FTP Mirror] Failed to mirror ${fileName} to Dharani:`, err.message);
-      return false;
-    } finally {
-      srcClient.close();
-      destClient.close();
-      if (fs.existsSync(tempFile)) {
-        try { fs.unlinkSync(tempFile); } catch (e) {}
-      }
-    }
-  }
-
-  /**
-   * Poll both camera FTP (sarath) and demo FTP (/Dharani)
+   * Poll user demo account /Dharani folder
    */
   async poll(isBaseline = false) {
     if (this.isPolling) return;
     this.isPolling = true;
 
+    const client = new ftp.Client();
+    client.ftp.verbose = false;
+
     try {
       this.lastPollTime = new Date().toISOString();
       this.lastError = null;
 
-      // 1. Poll camera upload destination (user: sarath)
-      await this.pollCameraSource(isBaseline);
-
-      // 2. Poll user destination (user: demo, dir: /Dharani)
-      await this.pollDemoDharani(isBaseline);
-
-    } catch (err) {
-      this.lastError = err.message;
-    } finally {
-      this.isPolling = false;
-    }
-  }
-
-  /**
-   * Poll camera FTP account (sarath) where physical camera 192.168.0.101 uploads
-   */
-  async pollCameraSource(isBaseline) {
-    const client = new ftp.Client();
-    client.ftp.verbose = false;
-
-    try {
       await client.access({
-        host: this.cameraConfig.host,
-        port: this.cameraConfig.port,
-        user: this.cameraConfig.user,
-        password: this.cameraConfig.password,
-        secure: this.cameraConfig.secure,
+        host: this.ftpConfig.host,
+        port: this.ftpConfig.port,
+        user: this.ftpConfig.user,
+        password: this.ftpConfig.password,
+        secure: this.ftpConfig.secure,
       });
 
-      // Check both root and Entry Gate
-      for (const remoteDir of this.cameraConfig.remoteDirs) {
-        let fileList = [];
-        try {
-          fileList = await client.list(remoteDir);
-        } catch (e) {
-          continue;
-        }
-
-        const detectedFiles = [];
-        const overviewFiles = new Map();
-
-        for (const item of fileList) {
-          if (item.isDirectory) continue;
-
-          // Track overview images e.g. 192.168.0.101_01_20261119141443471_LICENSE_PLATE_DETECTION.jpg
-          if (item.name.includes('_LICENSE_PLATE_DETECTION')) {
-            const timeKey = item.name.substring(0, 29); // Prefix up to sec
-            overviewFiles.set(timeKey, item.name);
-          }
-
-          const parsed = this.parseFileName(item.name);
-          if (parsed) {
-            detectedFiles.push({
-              ...parsed,
-              remotePath: remoteDir === '/' ? item.name : `${remoteDir}/${item.name}`,
-              size: item.size,
-              rawModifiedAt: item.rawModifiedAt,
-            });
-          }
-        }
-
-        // Sort newest first
-        detectedFiles.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-        if (isBaseline) {
-          if (detectedFiles.length > 0 && !this.latestDetection) {
-            const newest = detectedFiles[0];
-            console.log(`📸 [FTP ANPR] Baseline initialized from Camera FTP with plate: ${newest.plate} (${newest.fileName})`);
-            await this.recordDetectionToDb(newest);
-          }
-          for (const f of detectedFiles) {
-            this.processedFiles.add(f.fileName);
-          }
-          continue;
-        }
-
-        // Find newly uploaded files with detected plate
-        const newFiles = detectedFiles.filter(f => !this.processedFiles.has(f.fileName));
-
-        for (const newFile of newFiles) {
-          this.processedFiles.add(newFile.fileName);
-          console.log(`📸 [FTP ANPR] NEW VEHICLE CAPTURED BY CAMERA: ${newFile.plate} (File: ${newFile.fileName})`);
-
-          // 1. Immediately mirror/copy image into demo's /Dharani folder so user sees it in FTP portal!
-          await this.mirrorToDharani(newFile.remotePath, newFile.fileName);
-
-          // 2. Save into MySQL anpr_events & set latestDetection for Weighbridge auto-population
-          await this.recordDetectionToDb(newFile);
-        }
-
-        // Also mirror all newly uploaded overview detection images into demo's /Dharani
-        for (const [key, ovName] of overviewFiles.entries()) {
-          if (!this.processedFiles.has(ovName)) {
-            this.processedFiles.add(ovName);
-            const ovRemotePath = remoteDir === '/' ? ovName : `${remoteDir}/${ovName}`;
-            await this.mirrorToDharani(ovRemotePath, ovName);
-          }
-        }
-      }
-
-    } catch (err) {
-      this.lastError = err.message;
-    } finally {
-      client.close();
-    }
-  }
-
-  /**
-   * Poll user demo account /Dharani folder directly
-   */
-  async pollDemoDharani(isBaseline) {
-    const client = new ftp.Client();
-    client.ftp.verbose = false;
-
-    try {
-      await client.access({
-        host: this.demoConfig.host,
-        port: this.demoConfig.port,
-        user: this.demoConfig.user,
-        password: this.demoConfig.password,
-        secure: this.demoConfig.secure,
-      });
-
-      let targetDir = this.demoConfig.remoteDir || '/Dharani';
+      let targetDir = this.ftpConfig.remoteDir || '/Dharani';
       if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
       try {
         await client.cd(targetDir);
@@ -414,13 +235,14 @@ class FtpAnprWatcher {
       const newFiles = detectedFiles.filter(f => !this.processedFiles.has(f.fileName));
       for (const newFile of newFiles) {
         this.processedFiles.add(newFile.fileName);
-        console.log(`📸 [FTP ANPR] DETECTED VEHICLE DIRECTLY IN /Dharani: ${newFile.plate}`);
+        console.log(`📸 [FTP ANPR] NEW VEHICLE DETECTED IN /Dharani: ${newFile.plate} (File: ${newFile.fileName})`);
         await this.recordDetectionToDb(newFile);
       }
 
     } catch (err) {
       this.lastError = err.message;
     } finally {
+      this.isPolling = false;
       client.close();
     }
   }
@@ -441,7 +263,7 @@ class FtpAnprWatcher {
       source: 'Entry Gate ANPR Camera (FTP)',
       timestamp: timestamp || new Date().toISOString().replace('T', ' ').substring(0, 19),
       cameraId: 'cam_gate_1',
-      fileName,
+      fileName: fileName || '',
       direction: 'entry',
       matchedVehicle: {
         make: '',
@@ -453,21 +275,47 @@ class FtpAnprWatcher {
       }
     };
 
+    // Store in memory first and broadcast immediately
     this.latestDetection = detection;
     this.notifyListeners(detection);
 
-    // Try to record into MySQL and enrich with vehicle master match
     try {
+      // 1. Check vehicle master table for details
+      const [vRows] = await pool.query(
+        'SELECT make, model, driver_name, driver_phone, party_name, default_material, allowed_products FROM vehicles WHERE UPPER(REPLACE(vehicle_number, " ", "")) = ? LIMIT 1',
+        [cleanPlate]
+      );
+      if (vRows.length > 0) {
+        const v = vRows[0];
+        detection.matchedVehicle = {
+          make: v.make || '',
+          model: v.model || '',
+          driverName: v.driver_name || '',
+          driverPhone: v.driver_phone || '',
+          partyName: v.party_name || '',
+          product: v.default_material || v.allowed_products || '',
+        };
+        this.latestDetection = detection;
+      }
+    } catch (dbErr) {
+      console.warn('[FTP ANPR] Vehicle query warning:', dbErr.message);
+    }
+
+    try {
+      // 2. Insert into anpr_events table (auto-create if missing)
+      const sql = `
+        INSERT INTO anpr_events 
+          (event_id, event_type, timestamp, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction)
+        VALUES 
+          (?, 'ANPR_READ', ?, 'plant_001', 'cam_gate_1', ?, 0.9800, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry')
+        ON DUPLICATE KEY UPDATE updated_at = CURRENT_TIMESTAMP
+      `;
+
       try {
-        await pool.query(
-          `INSERT INTO anpr_events 
-           (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction, timestamp)
-           VALUES (?, 'plant_001', 'cam_gate_1', ?, 0.98, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry', ?)`,
-          [event_id, cleanPlate, timestamp || new Date()]
-        );
+        await pool.query(sql, [event_id, detection.timestamp, cleanPlate]);
       } catch (insertErr) {
-        if (insertErr.code === 'ER_NO_SUCH_TABLE' || (insertErr.message && insertErr.message.includes("doesn't exist"))) {
-          console.log('[FTP ANPR] anpr_events table missing, auto-creating table...');
+        if (insertErr.code === 'ER_NO_SUCH_TABLE') {
+          console.log('[FTP ANPR] Auto-creating anpr_events table...');
           await pool.query(`
             CREATE TABLE IF NOT EXISTS anpr_events (
               id INT AUTO_INCREMENT PRIMARY KEY,
@@ -490,67 +338,49 @@ class FtpAnprWatcher {
               INDEX idx_anpr_plant (plant_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
           `);
-          await pool.query(
-            `INSERT INTO anpr_events 
-             (event_id, plant_id, camera_id, vehicle_reg_no, confidence, source, status, direction, timestamp)
-             VALUES (?, 'plant_001', 'cam_gate_1', ?, 0.98, 'ANPR Camera (FTP /Dharani)', 'confirmed', 'entry', ?)`,
-            [event_id, cleanPlate, timestamp || new Date()]
-          );
+          await pool.query(sql, [event_id, detection.timestamp, cleanPlate]);
         } else {
-          console.warn('[FTP ANPR] DB insert warning:', insertErr.message);
+          throw insertErr;
         }
       }
 
-      // Query vehicles and trips for auto-match if tables exist
-      try {
-        const [vehRows] = await pool.query(
-          `SELECT v.make, v.model, v.current_driver, v.current_driver_phone, t.customer_name, t.material 
-           FROM vehicles v
-           LEFT JOIN trips t ON (REPLACE(UPPER(t.vehicle_reg_no), ' ', '') = REPLACE(UPPER(v.registration_no), ' ', ''))
-           WHERE REPLACE(UPPER(v.registration_no), ' ', '') = ?
-           LIMIT 1`,
-          [cleanPlate]
-        );
-
-        if (vehRows && vehRows.length > 0) {
-          const matched = vehRows[0];
-          detection.matchedVehicle = {
-            make: matched?.make || '',
-            model: matched?.model || '',
-            driverName: matched?.current_driver || '',
-            driverPhone: matched?.current_driver_phone || '',
-            partyName: matched?.customer_name || '',
-            product: matched?.material || '',
-          };
-          this.latestDetection = detection;
+      // 3. Insert into anpr_evidence table
+      if (fileName) {
+        try {
+          await pool.query(
+            'INSERT INTO anpr_evidence (event_id, file_name, file_url, camera_id) VALUES (?, ?, ?, ?)',
+            [event_id, fileName, `/Dharani/${fileName}`, 'cam_gate_1']
+          );
+        } catch (evErr) {
+          // ignore evidence table error
         }
-      } catch (vehErr) {}
+      }
 
-      return detection;
-    } catch (err) {
-      console.warn('[FTP ANPR] DB enrichment warning (cached plate preserved):', err.message);
-      return detection;
+      console.log(`💾 [FTP ANPR] Synced vehicle ${cleanPlate} from /Dharani/${fileName}`);
+    } catch (saveErr) {
+      console.warn('[FTP ANPR] Database save warning:', saveErr.message);
     }
+
+    return detection;
   }
 
   /**
-   * Force sync latest existing file from FTP for testing/instant verification
+   * On-demand sync for latest vehicle in /Dharani
    */
   async syncLatestExisting() {
-    // 1. Check demo/Dharani
     const client = new ftp.Client();
     client.ftp.verbose = false;
 
     try {
       await client.access({
-        host: this.demoConfig.host,
-        port: this.demoConfig.port,
-        user: this.demoConfig.user,
-        password: this.demoConfig.password,
-        secure: this.demoConfig.secure,
+        host: this.ftpConfig.host,
+        port: this.ftpConfig.port,
+        user: this.ftpConfig.user,
+        password: this.ftpConfig.password,
+        secure: this.ftpConfig.secure,
       });
 
-      let targetDir = this.demoConfig.remoteDir || '/Dharani';
+      let targetDir = this.ftpConfig.remoteDir || '/Dharani';
       if (!targetDir.startsWith('/')) targetDir = '/' + targetDir;
       try {
         await client.cd(targetDir);
@@ -581,56 +411,10 @@ class FtpAnprWatcher {
         return await this.recordDetectionToDb(latest);
       }
 
-      // If Dharani has none, check camera source (sarath)
-      client.close();
-      return await this.syncLatestFromCameraSource();
-
+      return null;
     } catch (err) {
       console.error('[FTP ANPR] syncLatestExisting error:', err.message);
       throw err;
-    } finally {
-      client.close();
-    }
-  }
-
-  async syncLatestFromCameraSource() {
-    const client = new ftp.Client();
-    client.ftp.verbose = false;
-
-    try {
-      await client.access({
-        host: this.cameraConfig.host,
-        port: this.cameraConfig.port,
-        user: this.cameraConfig.user,
-        password: this.cameraConfig.password,
-        secure: this.cameraConfig.secure,
-      });
-
-      const fileList = await client.list('/');
-      const detectedFiles = [];
-      for (const item of fileList) {
-        if (!item.isDirectory) {
-          const parsed = this.parseFileName(item.name);
-          if (parsed) {
-            detectedFiles.push({
-              ...parsed,
-              remotePath: item.name,
-              size: item.size,
-            });
-          }
-        }
-      }
-
-      detectedFiles.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-
-      if (detectedFiles.length > 0) {
-        const latest = detectedFiles[0];
-        console.log(`[FTP ANPR] Syncing latest from camera source: ${latest.plate} (${latest.fileName})`);
-        await this.mirrorToDharani(latest.remotePath, latest.fileName);
-        return await this.recordDetectionToDb(latest);
-      }
-
-      return null;
     } finally {
       client.close();
     }
@@ -656,10 +440,10 @@ class FtpAnprWatcher {
   getStatus() {
     return {
       running: !!this.pollTimer,
-      demoHost: this.demoConfig.host,
-      demoPort: this.demoConfig.port,
-      demoFolder: this.demoConfig.remoteDir,
-      cameraUser: this.cameraConfig.user,
+      host: this.ftpConfig.host,
+      port: this.ftpConfig.port,
+      user: this.ftpConfig.user,
+      folder: this.ftpConfig.remoteDir,
       totalFilesSeen: this.totalFilesSeen,
       processedCount: this.processedFiles.size,
       lastPollTime: this.lastPollTime,

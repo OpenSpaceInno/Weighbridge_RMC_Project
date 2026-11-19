@@ -2087,16 +2087,15 @@ app.post('/api/weighbridge/snapshots/upload', async (req, res) => {
           : rows[0].weighbridge_defaults;
       }
 
-      // Read configured FTP or fallback to verified demo user and /Dharani folder
-      const dbFtp = (defaults && defaults.ftp) ? defaults.ftp : {};
+      // Dedicated FTP configuration strictly for user demo and target folder /Dharani
       const ftpConfig = {
-        host: (dbFtp.host && !dbFtp.host.includes('192.168.0.15')) ? dbFtp.host : (process.env.FTP_HOST || 'ftp.activitsol.com'),
-        port: parseInt(dbFtp.port || process.env.FTP_PORT || '2121', 10),
-        user: (dbFtp.user && dbFtp.user !== 'weighbridge') ? dbFtp.user : (process.env.FTP_USER || 'demo'),
-        password: (dbFtp.password && dbFtp.user !== 'weighbridge') ? dbFtp.password : (process.env.FTP_PASSWORD || 'Password@123'),
-        secure: Boolean(dbFtp.secure),
-        enabled: dbFtp.enabled !== undefined ? Boolean(dbFtp.enabled) : true,
-        remoteDir: (dbFtp.remoteDir && dbFtp.remoteDir !== '/snapshots') ? dbFtp.remoteDir : (process.env.FTP_DIR || '/Dharani')
+        host: process.env.FTP_HOST || 'ftp.activitsol.com',
+        port: parseInt(process.env.FTP_PORT || '2121', 10),
+        user: process.env.FTP_USER || 'demo',
+        password: process.env.FTP_PASSWORD || 'Password@123',
+        secure: false,
+        enabled: true,
+        remoteDir: process.env.FTP_DIR || '/Dharani'
       };
 
       if (ftpConfig.enabled) {
@@ -5408,25 +5407,16 @@ function formatCompanySettings(row) {
         ? JSON.parse(row.weighbridge_defaults)
         : row.weighbridge_defaults;
     }
-    // Auto-migrate legacy FTP config to demo user /Dharani folder
-    if (!weighbridgeDefaults.ftp || !weighbridgeDefaults.ftp.host || weighbridgeDefaults.ftp.host.includes('192.168.0.15')) {
-      weighbridgeDefaults.ftp = {
-        enabled: true,
-        host: 'ftp.activitsol.com',
-        port: 2121,
-        user: 'demo',
-        password: 'Password@123',
-        secure: false,
-        remoteDir: '/Dharani',
-      };
-    }
-    if (weighbridgeDefaults.ftp.remoteDir === '/snapshots') {
-      weighbridgeDefaults.ftp.remoteDir = '/Dharani';
-    }
-    if (weighbridgeDefaults.ftp.user === 'weighbridge') {
-      weighbridgeDefaults.ftp.user = 'demo';
-      weighbridgeDefaults.ftp.password = 'Password@123';
-    }
+    // Dedicated FTP config strictly for demo user and /Dharani folder
+    weighbridgeDefaults.ftp = {
+      enabled: true,
+      host: 'ftp.activitsol.com',
+      port: 2121,
+      user: 'demo',
+      password: 'Password@123',
+      secure: false,
+      remoteDir: '/Dharani',
+    };
   } catch (e) {}
 
   return {
