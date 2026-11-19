@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 interface LiveANPRDetectorProps {
   cameraId: string;
   videoElement: HTMLVideoElement | null;
-  onPlateDetected: (plate: string, confidence: number) => void;
+  onPlateDetected: (plate: string, confidence: number, image?: string) => void;
   enabled?: boolean;
   onRegisterCapture?: (captureFunc: () => void) => void;
   onProcessingChange?: (isProcessing: boolean) => void;
@@ -138,8 +138,11 @@ export function LiveANPRDetector({
         });
         setDetectionCount(prev => prev + 1);
 
-        // Notify parent component (this will update the textbox)
-        onPlateDetected(detection.plate, detection.confidence);
+        // Cache latest captured frame
+        try { (window as any).__lastCapturedFrame = frameData; } catch {}
+
+        // Notify parent component with plate and captured video frame for FTP sync
+        onPlateDetected(detection.plate, detection.confidence, frameData);
 
         // Show toast notification
         toast.success("License Plate Detected!", {

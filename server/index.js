@@ -89,14 +89,17 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/snapshots', express.static(snapshotsDir));
 app.use('/api/sync', syncRouter);
 
-// Proxy /hls requests to MediaMTX HLS Gateway on port 8888
+// Proxy /hls requests to MediaMTX HLS Gateway
+const mediamtxHost = process.env.MEDIAMTX_HOST || '127.0.0.1';
+const mediamtxPort = parseInt(process.env.MEDIAMTX_PORT || '8888', 10);
+
 app.use('/hls', (req, res) => {
   const options = {
-    hostname: '127.0.0.1',
-    port: 8888,
+    hostname: mediamtxHost,
+    port: mediamtxPort,
     path: req.url,
     method: req.method,
-    headers: { ...req.headers, host: '127.0.0.1:8888' },
+    headers: { ...req.headers, host: `${mediamtxHost}:${mediamtxPort}` },
   };
   const proxyReq = http.request(options, (proxyRes) => {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);

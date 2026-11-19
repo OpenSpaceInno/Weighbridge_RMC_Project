@@ -282,7 +282,7 @@ class FtpAnprWatcher {
     try {
       // 1. Check vehicle master table for details
       const [vRows] = await pool.query(
-        'SELECT make, model, driver_name, driver_phone, party_name, default_material, allowed_products FROM vehicles WHERE UPPER(REPLACE(vehicle_number, " ", "")) = ? LIMIT 1',
+        'SELECT make, model, current_driver, current_driver_phone FROM vehicles WHERE UPPER(REPLACE(registration_no, " ", "")) = ? LIMIT 1',
         [cleanPlate]
       );
       if (vRows.length > 0) {
@@ -290,10 +290,10 @@ class FtpAnprWatcher {
         detection.matchedVehicle = {
           make: v.make || '',
           model: v.model || '',
-          driverName: v.driver_name || '',
-          driverPhone: v.driver_phone || '',
-          partyName: v.party_name || '',
-          product: v.default_material || v.allowed_products || '',
+          driverName: v.current_driver || '',
+          driverPhone: v.current_driver_phone || '',
+          partyName: '',
+          product: '',
         };
         this.latestDetection = detection;
       }
@@ -348,8 +348,8 @@ class FtpAnprWatcher {
       if (fileName) {
         try {
           await pool.query(
-            'INSERT INTO anpr_evidence (event_id, file_name, file_url, camera_id) VALUES (?, ?, ?, ?)',
-            [event_id, fileName, `/Dharani/${fileName}`, 'cam_gate_1']
+            'INSERT INTO anpr_evidence (event_id, evidence_type, url, angle) VALUES (?, ?, ?, ?)',
+            [event_id, 'image', `/snapshots/${fileName}`, 'front']
           );
         } catch (evErr) {
           // ignore evidence table error

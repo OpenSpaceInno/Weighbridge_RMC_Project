@@ -93,7 +93,9 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
     if (!video) return;
 
     if (hlsInstances.current[index]) {
-      hlsInstances.current[index]?.destroy();
+      try {
+        hlsInstances.current[index]?.destroy();
+      } catch {}
       hlsInstances.current[index] = null;
     }
 
@@ -112,12 +114,12 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         lowLatencyMode: true,
         backBufferLength: 10,
         manifestLoadingTimeOut: 5000,
-        manifestLoadingMaxRetry: 5,
+        manifestLoadingMaxRetry: 10,
         manifestLoadingRetryDelay: 1000,
         levelLoadingTimeOut: 5000,
-        levelLoadingMaxRetry: 4,
+        levelLoadingMaxRetry: 6,
         fragLoadingTimeOut: 5000,
-        fragLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6,
       });
 
       hls.loadSource(targetUrl);
@@ -136,25 +138,47 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              // Try direct localhost:8888 fallback if proxy failed
-              if (targetUrl.startsWith('/hls/')) {
+              // Only try direct localhost:8888 fallback if on http: protocol (prevents Mixed Content error on HTTPS)
+              if (window.location.protocol === 'http:' && targetUrl.startsWith('/hls/')) {
                 const directUrl = `http://localhost:8888${targetUrl.replace('/hls', '')}`;
                 hls.loadSource(directUrl);
                 hls.startLoad();
               } else {
                 hls.startLoad();
               }
+              // Auto-recover after 3 seconds if not connected
+              setTimeout(() => {
+                setCameras(current => {
+                  if (current[index]?.status !== 'connected') {
+                    initHls(index);
+                  }
+                  return current;
+                });
+              }, 3000);
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
               hls.recoverMediaError();
+              setTimeout(() => {
+                setCameras(current => {
+                  if (current[index]?.status !== 'connected') {
+                    initHls(index);
+                  }
+                  return current;
+                });
+              }, 3000);
               break;
             default:
+              // Destroy failing instance and auto-reconnect cleanly after 2.5s - NEVER stay off
+              try { hls.destroy(); } catch {}
+              hlsInstances.current[index] = null;
               setCameras(prev => {
                 const next = [...prev];
-                next[index] = { ...next[index], status: 'standby' };
+                next[index] = { ...next[index], status: 'connecting' };
                 return next;
               });
-              hls.destroy();
+              setTimeout(() => {
+                initHls(index);
+              }, 2500);
               break;
           }
         }
@@ -174,12 +198,26 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       video.addEventListener('error', () => {
         setCameras(prev => {
           const next = [...prev];
-          next[index] = { ...next[index], status: 'standby' };
+          next[index] = { ...next[index], status: 'connecting' };
           return next;
         });
+        setTimeout(() => initHls(index), 2500);
       });
     }
   }, [cameras]);
+
+  // Keep camera 1 plateSample in sync with vehicleRegNo prop
+  useEffect(() => {
+    if (vehicleRegNo) {
+      setCameras(prev => {
+        const next = [...prev];
+        if (next[0].plateSample !== vehicleRegNo) {
+          next[0] = { ...next[0], plateSample: vehicleRegNo };
+        }
+        return next;
+      });
+    }
+  }, [vehicleRegNo]);
 
   // Mount & initialize both camera streams
   useEffect(() => {
@@ -196,6 +234,28 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
       });
     };
   }, []);
+
+  // 24/7 Industrial Auto-Healing Watchdog: Ensures live cameras NEVER go to off / standby state
+  useEffect(() => {
+    const watchdogTimer = setInterval(() => {
+      [0, 1].forEach(idx => {
+        const vid = videoRefs[idx].current;
+        const cam = cameras[idx];
+
+        // 1. Force resume playback if video paused but ready
+        if (vid && vid.paused && vid.readyState >= 2) {
+          vid.play().catch(() => {});
+        }
+
+        // 2. If camera stream dropped, instance missing, or not connected, auto-heal
+        if (!hlsInstances.current[idx] || cam.status !== 'connected' || !vid || vid.readyState === 0) {
+          initHls(idx);
+        }
+      });
+    }, 4000);
+
+    return () => clearInterval(watchdogTimer);
+  }, [cameras, initHls]);
 
   // Frame capture implementation with industrial metrology watermark stamp
   const captureFrame = useCallback((
@@ -436,15 +496,10 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     <span>Live 1080P</span>
                   </span>
-                ) : cam.status === 'standby' ? (
-                  <span className="flex items-center gap-1.5 text-amber-500 font-medium">
-                    <span className="w-2 h-2 rounded-full bg-amber-500" />
-                    <span>RTSP Standby</span>
-                  </span>
                 ) : (
-                  <span className="flex items-center gap-1.5 text-sky-500 font-medium">
-                    <span className="w-2 h-2 rounded-full bg-sky-500 animate-ping" />
-                    <span>Connecting...</span>
+                  <span className="flex items-center gap-1.5 text-emerald-500 font-medium">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    <span>Live Reconnecting...</span>
                   </span>
                 )}
               </div>
@@ -464,8 +519,8 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
               {/* Grid overlay for alignment */}
               <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:2rem_2rem] pointer-events-none z-10" />
 
-              {/* Standby / Connecting backdrop if video not ready */}
-              {cam.status !== 'connected' && (
+              {/* Connecting backdrop ONLY if video has no frame data at all */}
+              {cam.status !== 'connected' && (!videoRefs[idx].current || videoRefs[idx].current?.readyState === 0) && (
                 <div className="absolute inset-0 z-10 bg-gradient-to-b from-neutral-900/90 to-neutral-950/95 flex flex-col items-center justify-center p-4 text-center">
                   <div className="p-3 rounded-full bg-primary/10 border border-primary/20 text-primary mb-2">
                     <Activity className="w-5 h-5 animate-pulse" />
@@ -474,7 +529,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     {cam.name}
                   </p>
                   <p className="text-[11px] font-mono text-neutral-400 mt-0.5">
-                    RTSP Gateway: {cam.ip}:554
+                    RTSP Gateway: {cam.ip}:554 · Auto-Heal Active
                   </p>
                   <button
                     type="button"
@@ -482,7 +537,7 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
                     className="mt-3 px-3 py-1 rounded-md bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-[11px] font-mono flex items-center gap-1.5 shadow-xs transition-colors"
                   >
                     <RefreshCw className="w-3 h-3" />
-                    <span>Reconnect Stream</span>
+                    <span>Force Reconnect</span>
                   </button>
                 </div>
               )}

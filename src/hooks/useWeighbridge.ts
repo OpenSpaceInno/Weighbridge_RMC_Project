@@ -165,9 +165,9 @@ export const useWeighbridge = () => {
   const [autoSyncGateVehicle, setAutoSyncGateVehicle] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem('rmc_auto_sync_gate');
-      return stored === 'true';
+      return stored !== 'false';
     } catch {
-      return false;
+      return true;
     }
   });
 

@@ -126,7 +126,7 @@ const GateMonitor = () => {
   };
 
   // Handle plate detection from live camera
-  const handlePlateDetected = (plate: string, confidence: number) => {
+  const handlePlateDetected = (plate: string, confidence: number, image?: string) => {
     console.log('✅ Plate detected and displayed:', plate, 'Confidence:', confidence);
     setDetectedPlate(plate);
     setDetectedConfidence(confidence);
@@ -149,7 +149,25 @@ const GateMonitor = () => {
       source: 'Gate Entry ANPR Camera (FTP)'
     }).catch(err => console.warn('Could not post gate vehicle to backend:', err));
 
-    // 3. Broadcast real-time event to Weighbridge module
+    // 3. Automatically upload camera snapshot to FTP /Dharani folder under user demo
+    const frameData = image || (window as any).__lastCapturedFrame;
+    if (frameData) {
+      api.uploadWeighbridgeSnapshots({
+        transactionNo: 0,
+        vehicleRegNo: cleanPlate,
+        weight: 0,
+        images: [{
+          camId: 'cam_gate_1',
+          camName: 'Gate Entry ANPR Camera',
+          angle: 'front',
+          dataUrl: frameData,
+        }],
+      }).then(() => {
+        console.log(`✅ Snapshot saved to FTP /Dharani for vehicle: ${cleanPlate}`);
+      }).catch(err => console.warn('FTP upload warning:', err));
+    }
+
+    // 4. Broadcast real-time event to Weighbridge module
     try {
       const channel = new BroadcastChannel('rmc_gate_sync');
       channel.postMessage({

@@ -34,7 +34,7 @@ interface LiveFeedViewerProps {
   camera: CameraFeed;
   showControls?: boolean;
   enableANPR?: boolean;
-  onPlateDetected?: (plate: string, confidence: number) => void;
+  onPlateDetected?: (plate: string, confidence: number, image?: string) => void;
   onRegisterCapture?: (captureFunc: () => void) => void;
 }
 
@@ -108,9 +108,9 @@ export function LiveFeedViewer({
           reconnectInterval: data.reconnect_interval || 5,
           bufferSize: data.buffer_size || 1024,
           lowLatencyMode: Boolean(data.low_latency_mode),
-          hlsProxyUrl: data.hls_proxy_url || (camera.id === 'cam_gate_1' 
-            ? 'http://localhost:8888/cam1/index.m3u8' 
-            : 'http://localhost:8888/cam2/index.m3u8'),
+          hlsProxyUrl: (data.hls_proxy_url && data.hls_proxy_url.startsWith('/hls/'))
+            ? data.hls_proxy_url
+            : (camera.id === 'cam_gate_1' ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8'),
         };
         setRtspConfig(config);
       } else {
@@ -129,9 +129,7 @@ export function LiveFeedViewer({
           reconnectInterval: 5,
           bufferSize: 1024,
           lowLatencyMode: true,
-          hlsProxyUrl: camera.id === 'cam_gate_1'
-            ? 'http://localhost:8888/cam1/index.m3u8'
-            : 'http://localhost:8888/cam2/index.m3u8',
+          hlsProxyUrl: camera.id === 'cam_gate_1' ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8',
         };
         setRtspConfig(defaultConfig);
       }
@@ -151,9 +149,7 @@ export function LiveFeedViewer({
         reconnectInterval: 5,
         bufferSize: 1024,
         lowLatencyMode: true,
-        hlsProxyUrl: camera.id === 'cam_gate_1'
-          ? 'http://localhost:8888/cam1/index.m3u8'
-          : 'http://localhost:8888/cam2/index.m3u8',
+        hlsProxyUrl: camera.id === 'cam_gate_1' ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8',
       });
     } finally {
       setLoading(false);
@@ -257,6 +253,23 @@ export function LiveFeedViewer({
       }
     };
   }, [rtspConfig?.hlsProxyUrl, reconnectCount, feedMode, connectHlsStream]);
+
+  // 24/7 Auto-Reconnect Watchdog: Periodically re-attempt connecting to real RTSP camera feed
+  useEffect(() => {
+    const watchdog = setInterval(() => {
+      const vid = videoRef.current;
+      if (streamStatus !== 'connected' || (vid && (vid.paused || vid.readyState < 2))) {
+        if (vid && vid.paused && vid.readyState >= 2) {
+          vid.play().catch(() => {});
+        } else if (!hlsRef.current || streamStatus === 'error' || streamStatus === 'simulated') {
+          console.log(`[${camera.id}] Auto-reconnecting live stream...`);
+          connectHlsStream();
+        }
+      }
+    }, 4500);
+
+    return () => clearInterval(watchdog);
+  }, [camera.id, connectHlsStream, streamStatus]);
 
   // Activate Simulated Live Preview Feed
   const handleStartSimulation = () => {

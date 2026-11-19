@@ -99,31 +99,56 @@ export const Weighbridge: React.FC = () => {
   }, [fetchAndApplyGateVehicle, toast]);
 
   const handleFetchCameraANPR = useCallback(async () => {
+    let detectedPlate = '';
     if (cameraPanelRef.current) {
       const plate = cameraPanelRef.current.fetchDetectedPlate();
       if (plate) {
+        detectedPlate = plate;
         updateFormField('vehicleRegNo', plate);
         toast({
           title: 'ANPR Plate Fetched',
           description: `Vehicle ${plate} read from Camera 1 Front ANPR.`,
         });
-        return;
       }
     }
     // Fallback to latest FTP / Gate camera detection
-    const res = await fetchAndApplyGateVehicle();
-    if (res?.vehicleRegNo) {
-      toast({
-        title: 'ANPR Plate Fetched from Gate/FTP',
-        description: `Vehicle ${res.vehicleRegNo} loaded from FTP Camera`,
-      });
-    } else {
-      toast({
-        title: 'No Vehicle on Camera',
-        description: 'Camera 1 ANPR and Gate FTP show no vehicle currently present.',
-      });
+    if (!detectedPlate) {
+      const res = await fetchAndApplyGateVehicle();
+      if (res?.vehicleRegNo) {
+        detectedPlate = res.vehicleRegNo;
+        toast({
+          title: 'ANPR Plate Fetched from Gate/FTP',
+          description: `Vehicle ${res.vehicleRegNo} loaded from FTP Camera`,
+        });
+      } else {
+        toast({
+          title: 'No Vehicle on Camera',
+          description: 'Camera 1 ANPR and Gate FTP show no vehicle currently present.',
+        });
+      }
     }
-  }, [fetchAndApplyGateVehicle, updateFormField, toast]);
+
+    // Automatically snapshot live cameras and upload to FTP /Dharani for this vehicle
+    if (detectedPlate && cameraPanelRef.current) {
+      try {
+        const frames = await cameraPanelRef.current.captureAllSnapshots({
+          vehicleNo: detectedPlate,
+          weight: currentWeight.weight,
+          transactionNo: formData.transactionNo,
+        });
+        if (frames && frames.length > 0) {
+          api.uploadWeighbridgeSnapshots({
+            transactionNo: formData.transactionNo,
+            vehicleRegNo: detectedPlate,
+            weight: currentWeight.weight,
+            images: frames,
+          }).then(res => {
+            if (res?.snapshots) addEvidenceItems(res.snapshots as any);
+          }).catch(() => {});
+        }
+      } catch {}
+    }
+  }, [fetchAndApplyGateVehicle, updateFormField, currentWeight.weight, formData.transactionNo, addEvidenceItems, toast]);
 
   const handlePrintF5 = useCallback(() => {
     handlePrint();
@@ -252,6 +277,39 @@ export const Weighbridge: React.FC = () => {
     }
   }, [currentWeight.weight, formData.transactionNo, formData.vehicleRegNo, addEvidenceItems, takeSnapshot, toast]);
 
+  // Automated Save & Print (F4) + Multi-camera snapshot capture + FTP sync
+  const handleSaveAndPrintWithSnapshots = useCallback(async () => {
+    try {
+      setIsCapturingSnapshots(true);
+      if (cameraPanelRef.current) {
+        const capturedFrames = await cameraPanelRef.current.captureAllSnapshots({
+          weight: currentWeight.weight,
+          vehicleNo: formData.vehicleRegNo,
+          transactionNo: formData.transactionNo,
+        });
+
+        if (capturedFrames && capturedFrames.length > 0) {
+          const uploadRes = await api.uploadWeighbridgeSnapshots({
+            transactionNo: formData.transactionNo,
+            vehicleRegNo: formData.vehicleRegNo,
+            weight: currentWeight.weight,
+            images: capturedFrames,
+          });
+
+          if (uploadRes && uploadRes.snapshots && uploadRes.snapshots.length > 0) {
+            addEvidenceItems(uploadRes.snapshots as any);
+          }
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Camera capture warning during Save & Print:', snapErr);
+    } finally {
+      setIsCapturingSnapshots(false);
+    }
+
+    await handleSaveAndPrint();
+  }, [cameraPanelRef, currentWeight.weight, formData.transactionNo, formData.vehicleRegNo, addEvidenceItems, handleSaveAndPrint]);
+
   // Global Keyboard Shortcuts (F1–F7) with browser default override
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -279,7 +337,7 @@ export const Weighbridge: React.FC = () => {
       // F4: Save & Print
       else if (e.key === 'F4') {
         e.preventDefault();
-        handleSaveAndPrint();
+        handleSaveAndPrintWithSnapshots();
       }
       // F5: Print
       else if (e.key === 'F5') {
@@ -959,7 +1017,7 @@ export const Weighbridge: React.FC = () => {
           <button
             type="button"
             onClick={async () => {
-              await handleSaveAndPrint();
+              await handleSaveAndPrintWithSnapshots();
               toast({
                 title: 'Saved & Print Ready (F4)',
                 description: `Transaction #${formData.transactionNo} saved and official weigh slip generated.`,
