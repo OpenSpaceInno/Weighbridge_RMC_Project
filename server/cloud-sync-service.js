@@ -68,7 +68,7 @@ export class CloudSyncService {
     this.cloudSyncSecret = process.env.CLOUD_SYNC_SECRET || 'Aparna_RMC_Cloud_Sync_Secret_2026!';
     this.plantId = process.env.PLANT_ID || 'PL01';
     this.intervalMs = Math.max(5000, Number(process.env.CLOUD_SYNC_INTERVAL_MS) || 300000); // 5 minutes default
-    this.syncBatchSize = Number(process.env.CLOUD_SYNC_BATCH_SIZE) || 200;
+    this.syncBatchSize = Number(process.env.CLOUD_SYNC_BATCH_SIZE) || 1000;
     this.isEnabled = process.env.CLOUD_SYNC_ENABLED !== 'false';
 
     this.remoteDbPool = null;
@@ -275,68 +275,86 @@ export class CloudSyncService {
 
     try {
       const activeTables = await this.getExistingLocalTables();
-      const batchPayload = {};
+      let hasMoreBatches = true;
+      let loopIteration = 0;
+      const MAX_BATCH_LOOPS = 50;
 
-      for (const table of activeTables) {
-        try {
-          // Read watermark from tracking table
-          const [trackRows] = await pool.query(
-            'SELECT last_synced_at FROM edge_sync_tracking WHERE table_name = ?',
-            [table]
-          );
+      while (hasMoreBatches && loopIteration < MAX_BATCH_LOOPS) {
+        loopIteration++;
+        hasMoreBatches = false;
+        const batchPayload = {};
 
-          const lastSyncedAt = trackRows.length > 0 && trackRows[0].last_synced_at
-            ? new Date(trackRows[0].last_synced_at)
-            : new Date('2000-01-01 00:00:00');
+        for (const table of activeTables) {
+          try {
+            // Read watermark from tracking table
+            const [trackRows] = await pool.query(
+              'SELECT last_synced_at FROM edge_sync_tracking WHERE table_name = ?',
+              [table]
+            );
 
-          // Query table columns to select optimal change detection watermark
-          const [colRows] = await pool.query(
-            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
-            [table]
-          );
-          const cols = new Set(colRows.map((c) => c.COLUMN_NAME.toLowerCase()));
+            const lastSyncedAt = trackRows.length > 0 && trackRows[0].last_synced_at
+              ? new Date(trackRows[0].last_synced_at)
+              : new Date('2000-01-01 00:00:00');
 
-          let query = '';
-          let orderCol = '';
+            // Query table columns to select optimal change detection watermark
+            const [colRows] = await pool.query(
+              `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+              [table]
+            );
+            const cols = new Set(colRows.map((c) => c.COLUMN_NAME.toLowerCase()));
 
-          if (cols.has('updated_at')) {
-            orderCol = 'updated_at';
-            query = `SELECT * FROM \`${table}\` WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?`;
-          } else if (cols.has('created_at')) {
-            orderCol = 'created_at';
-            query = `SELECT * FROM \`${table}\` WHERE created_at > ? ORDER BY created_at ASC LIMIT ?`;
-          } else if (cols.has('timestamp')) {
-            orderCol = 'timestamp';
-            query = `SELECT * FROM \`${table}\` WHERE timestamp > ? ORDER BY timestamp ASC LIMIT ?`;
-          } else {
-            // Static lookup tables without timestamps: sync if not yet tracked
-            if (trackRows.length === 0 || lastSyncedAt.getFullYear() <= 2000) {
-              query = `SELECT * FROM \`${table}\` LIMIT ?`;
+            let query = '';
+            let orderCol = '';
+
+            if (cols.has('updated_at')) {
+              orderCol = 'updated_at';
+              query = `SELECT * FROM \`${table}\` WHERE updated_at > ? ORDER BY updated_at ASC LIMIT ?`;
+            } else if (cols.has('created_at')) {
+              orderCol = 'created_at';
+              query = `SELECT * FROM \`${table}\` WHERE created_at > ? ORDER BY created_at ASC LIMIT ?`;
+            } else if (cols.has('timestamp')) {
+              orderCol = 'timestamp';
+              query = `SELECT * FROM \`${table}\` WHERE timestamp > ? ORDER BY timestamp ASC LIMIT ?`;
             } else {
-              continue;
+              // Static lookup tables without timestamps: sync if not yet tracked
+              if (trackRows.length === 0 || lastSyncedAt.getFullYear() <= 2000) {
+                query = `SELECT * FROM \`${table}\` LIMIT ?`;
+              } else {
+                continue;
+              }
             }
-          }
 
-          const params = orderCol ? [lastSyncedAt, this.syncBatchSize] : [this.syncBatchSize];
-          const [rows] = await pool.query(query, params);
+            const params = orderCol ? [lastSyncedAt, this.syncBatchSize] : [this.syncBatchSize];
+            const [rows] = await pool.query(query, params);
 
-          if (rows && rows.length > 0) {
-            batchPayload[table] = {
-              rows,
-              orderCol,
-              maxTimestamp: orderCol
-                ? rows.reduce((max, r) => (new Date(r[orderCol]) > new Date(max) ? r[orderCol] : max), rows[0][orderCol])
-                : new Date(),
-            };
+            if (rows && rows.length > 0) {
+              batchPayload[table] = {
+                rows,
+                orderCol,
+                maxTimestamp: orderCol
+                  ? rows.reduce((max, r) => (new Date(r[orderCol]) > new Date(max) ? r[orderCol] : max), rows[0][orderCol])
+                  : new Date(),
+              };
+              if (rows.length >= this.syncBatchSize) {
+                hasMoreBatches = true; // More records pending for this table
+              }
+            }
+          } catch (tblErr) {
+            report.errors.push(`Table ${table} read error: ${tblErr.message}`);
           }
-        } catch (tblErr) {
-          report.errors.push(`Table ${table} read error: ${tblErr.message}`);
         }
-      }
 
-      const tableNames = Object.keys(batchPayload);
-      if (tableNames.length > 0) {
+        const tableNames = Object.keys(batchPayload);
+        if (tableNames.length === 0) {
+          if (loopIteration === 1) {
+            report.status = 'clean_no_changes';
+            this.lastSyncReport.status = 'idle';
+            this.log('✅ Sync check complete: All tables clean. Local database is fully in sync with server.');
+          }
+          break;
+        }
+
         const payloadData = {};
         for (const t of tableNames) {
           payloadData[t] = batchPayload[t].rows;
@@ -383,13 +401,19 @@ export class CloudSyncService {
               [table, maxTimestamp, rows.length]
             );
 
-            report.tableDetails[table] = stats;
+            if (!report.tableDetails[table]) {
+              report.tableDetails[table] = { inserted: 0, updated: 0, unchanged: 0 };
+            }
+            report.tableDetails[table].inserted += stats.inserted || 0;
+            report.tableDetails[table].updated += stats.updated || 0;
+            report.tableDetails[table].unchanged += stats.unchanged || 0;
+
             report.totalInserted += stats.inserted || 0;
             report.totalUpdated += stats.updated || 0;
             report.totalUnchanged += stats.unchanged || 0;
           }
 
-          report.tablesProcessed = tableNames.length;
+          report.tablesProcessed = Object.keys(report.tableDetails).length;
           report.status = 'success';
           this.lastSyncReport.lastSuccessAt = new Date().toISOString();
           this.lastSyncReport.status = 'healthy';
@@ -398,7 +422,7 @@ export class CloudSyncService {
           this.lastSyncReport.totalUnchanged += report.totalUnchanged;
 
           this.log(
-            `✅ Sync Success [Channel: ${report.channel}]: ${report.tablesProcessed} tables | ` +
+            `✅ Sync Batch #${loopIteration} [Channel: ${report.channel}]: ${tableNames.length} tables | ` +
             `Inserted: ${report.totalInserted} | Updated: ${report.totalUpdated} | Unchanged: ${report.totalUnchanged} ` +
             `(${tableNames.join(', ')})`
           );
@@ -406,11 +430,8 @@ export class CloudSyncService {
           report.status = 'offline_queued';
           this.lastSyncReport.status = 'offline_queued';
           this.log(`⚠️ Server unreachable. ${tableNames.length} tables queued locally. Will retry in 5 minutes.`);
+          break;
         }
-      } else {
-        report.status = 'clean_no_changes';
-        this.lastSyncReport.status = 'idle';
-        this.log('✅ Sync check complete: All tables clean. Local database is fully in sync with server.');
       }
     } catch (cycleErr) {
       report.status = 'error';
