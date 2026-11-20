@@ -56,7 +56,7 @@ export const AVAILABLE_CAMERAS: CameraSource[] = [
     role: 'Front Bumper / Plate OCR',
     ip: '192.168.0.101',
     rtsp: 'rtsp://admin:Password@123@192.168.0.101:554/ch1/main/av_stream',
-    hls: 'http://localhost:8888/cam1/index.m3u8',
+    hls: '/hls/cam1/index.m3u8',
     resolution: '3K UHD (2880x1620)',
     defaultAngle: 'front',
     plateSample: 'MH 12 RN 4501'
@@ -68,7 +68,7 @@ export const AVAILABLE_CAMERAS: CameraSource[] = [
     role: 'Scale Platform & Wheel Deck',
     ip: '192.168.0.99',
     rtsp: 'rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101',
-    hls: 'http://localhost:8888/cam2/index.m3u8',
+    hls: '/hls/cam2/index.m3u8',
     resolution: '1080P FHD (1920x1080)',
     defaultAngle: 'side',
     plateSample: 'KA 04 MM 9123'
@@ -80,7 +80,7 @@ export const AVAILABLE_CAMERAS: CameraSource[] = [
     role: 'Chute Seal & Rear Plate',
     ip: '192.168.0.99',
     rtsp: 'rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101',
-    hls: 'http://localhost:8888/cam3/index.m3u8',
+    hls: '/hls/cam3/index.m3u8',
     resolution: '1080P FHD (1920x1080)',
     defaultAngle: 'rear',
     plateSample: 'MH 14 DE 7890'
@@ -316,7 +316,13 @@ export function WeighbridgeLiveStream({
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              hls.startLoad();
+              const fallbackUrl = cam.id === 'cam_gate_1' ? '/hls/live_cam1/index.m3u8' : '/hls/live_cam2/index.m3u8';
+              if (cam.hls !== fallbackUrl) {
+                hls.loadSource(fallbackUrl);
+                hls.startLoad();
+              } else {
+                hls.startLoad();
+              }
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
               hls.recoverMediaError();

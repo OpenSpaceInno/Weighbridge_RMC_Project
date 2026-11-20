@@ -138,8 +138,26 @@ class ApiClient {
       reachable: boolean;
       ports: { '554': boolean; '80': boolean; '8000': boolean };
       status: string;
+      relayed?: boolean;
       message: string;
     }>(`/cameras/diagnostic/${ip}`);
+  }
+
+  // Edge-to-Cloud 24/7 Stream Relay status
+  async getStreamRelayStatus() {
+    return this.request<{
+      enabled: boolean;
+      remoteHost: string;
+      remotePort: number;
+      cameras: Array<{
+        id: string;
+        name: string;
+        localPath: string;
+        remotePath: string;
+        status: string;
+        uptimeSeconds: number;
+      }>;
+    }>('/stream-relay/status');
   }
 
   // RTSP configuration

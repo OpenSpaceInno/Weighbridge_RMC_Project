@@ -138,8 +138,12 @@ export const DualCameraFeedPanel = forwardRef<DualCameraFeedPanelHandle, DualCam
         if (data.fatal) {
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              // Only try direct localhost:8888 fallback if on http: protocol (prevents Mixed Content error on HTTPS)
-              if (window.location.protocol === 'http:' && targetUrl.startsWith('/hls/')) {
+              // Try edge relay fallback path if primary failed
+              const fallbackUrl = index === 0 ? '/hls/live_cam1/index.m3u8' : '/hls/live_cam2/index.m3u8';
+              if (targetUrl !== fallbackUrl) {
+                hls.loadSource(fallbackUrl);
+                hls.startLoad();
+              } else if (window.location.hostname === 'localhost' && window.location.protocol === 'http:' && targetUrl.startsWith('/hls/')) {
                 const directUrl = `http://localhost:8888${targetUrl.replace('/hls', '')}`;
                 hls.loadSource(directUrl);
                 hls.startLoad();

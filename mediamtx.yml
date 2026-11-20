@@ -582,27 +582,37 @@ paths:
     sourceProtocol: tcp
     sourceOnDemand: no
 
-  # Camera 3 - Exit / Rear Surveillance (192.168.0.99)
+  # Camera 3 - Exit / Rear Surveillance (Relayed from cam2)
   cam3:
-    source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
+    source: rtsp://127.0.0.1:8554/cam2
     sourceProtocol: tcp
-    sourceOnDemand: no
+    sourceOnDemand: yes
 
   # Alias paths
+  live_cam1:
+    source: rtsp://127.0.0.1:8554/cam1
+    sourceProtocol: tcp
+    sourceOnDemand: yes
+
+  live_cam2:
+    source: rtsp://127.0.0.1:8554/cam2
+    sourceProtocol: tcp
+    sourceOnDemand: yes
+
   anpr:
     source: rtsp://127.0.0.1:8554/cam1
     sourceProtocol: tcp
-    sourceOnDemand: no
+    sourceOnDemand: yes
 
   ipcam:
-    source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
+    source: rtsp://127.0.0.1:8554/cam2
     sourceProtocol: tcp
-    sourceOnDemand: no
+    sourceOnDemand: yes
 
   weighbridge:
-    source: rtsp://admin:Password@123@192.168.0.99:554/Streaming/Channels/101
+    source: rtsp://127.0.0.1:8554/cam2
     sourceProtocol: tcp
-    sourceOnDemand: no
+    sourceOnDemand: yes
 
   # Test stream (if needed)
   test:

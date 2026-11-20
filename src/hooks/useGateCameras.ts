@@ -59,7 +59,7 @@ export function useGateCameras() {
             reconnect_interval: 5,
             buffer_size: 1024,
             low_latency_mode: true,
-            hls_proxy_url: 'http://localhost:8888/cam1/index.m3u8',
+            hls_proxy_url: '/hls/cam1/index.m3u8',
           });
         }
       } catch {
@@ -77,7 +77,7 @@ export function useGateCameras() {
           reconnect_interval: 5,
           buffer_size: 1024,
           low_latency_mode: true,
-          hls_proxy_url: 'http://localhost:8888/cam1/index.m3u8',
+          hls_proxy_url: '/hls/cam1/index.m3u8',
         });
       }
 
@@ -97,7 +97,7 @@ export function useGateCameras() {
             reconnect_interval: 5,
             buffer_size: 1024,
             low_latency_mode: true,
-            hls_proxy_url: 'http://localhost:8888/cam2/index.m3u8',
+            hls_proxy_url: '/hls/cam2/index.m3u8',
           });
         }
       } catch {
@@ -114,7 +114,7 @@ export function useGateCameras() {
           reconnect_interval: 5,
           buffer_size: 1024,
           low_latency_mode: true,
-          hls_proxy_url: 'http://localhost:8888/cam2/index.m3u8',
+          hls_proxy_url: '/hls/cam2/index.m3u8',
         });
       }
 

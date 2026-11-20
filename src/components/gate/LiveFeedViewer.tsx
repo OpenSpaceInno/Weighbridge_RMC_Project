@@ -110,7 +110,9 @@ export function LiveFeedViewer({
           lowLatencyMode: Boolean(data.low_latency_mode),
           hlsProxyUrl: (data.hls_proxy_url && data.hls_proxy_url.startsWith('/hls/'))
             ? data.hls_proxy_url
-            : (camera.id === 'cam_gate_1' ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8'),
+            : (data.hls_proxy_url && data.hls_proxy_url.includes(':8888/'))
+              ? data.hls_proxy_url.replace(/http:\/\/localhost:8888/, '/hls')
+              : (camera.id === 'cam_gate_1' ? '/hls/cam1/index.m3u8' : '/hls/cam2/index.m3u8'),
         };
         setRtspConfig(config);
       } else {
@@ -160,7 +162,7 @@ export function LiveFeedViewer({
     loadOrCreateRTSPConfig();
   }, [loadOrCreateRTSPConfig]);
 
-  // Connect HLS Stream (with fast timeout fallback)
+  // Connect HLS Stream (with smart fallback to Edge Relay stream)
   const connectHlsStream = useCallback(() => {
     if (feedMode === 'simulated') return;
     if (!rtspConfig?.hlsProxyUrl || !videoRef.current) return;
@@ -174,25 +176,29 @@ export function LiveFeedViewer({
     }
 
     let networkRetryCount = 0;
-    const maxRetries = 2;
+    const maxRetries = 4;
+    const primaryUrl = rtspConfig.hlsProxyUrl;
+    const fallbackUrl = camera.id === 'cam_gate_1' ? '/hls/live_cam1/index.m3u8' : '/hls/live_cam2/index.m3u8';
+    let currentSource = primaryUrl;
 
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: true,
-        backBufferLength: 60,
-        manifestLoadingTimeOut: 4000,
-        manifestLoadingMaxRetry: 2,
-        levelLoadingTimeOut: 4000,
-        fragLoadingTimeOut: 4000,
+        backBufferLength: 30,
+        manifestLoadingTimeOut: 8000,
+        manifestLoadingMaxRetry: 4,
+        manifestLoadingRetryDelay: 1000,
+        levelLoadingTimeOut: 8000,
+        fragLoadingTimeOut: 8000,
       });
 
       hlsRef.current = hls;
-      hls.loadSource(rtspConfig.hlsProxyUrl);
+      hls.loadSource(currentSource);
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        console.log(`[${camera.id}] HLS manifest parsed successfully`);
+        console.log(`[${camera.id}] HLS manifest parsed successfully from ${currentSource}`);
         stopSimulation();
         setStreamStatus('connected');
         video.play().catch(e => console.warn('Autoplay error:', e));
@@ -203,11 +209,17 @@ export function LiveFeedViewer({
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
               networkRetryCount++;
-              if (networkRetryCount <= maxRetries) {
-                console.log(`[${camera.id}] HLS network error, retry ${networkRetryCount}/${maxRetries}...`);
+              // If primary URL fails twice and fallback URL is different, try fallback
+              if (networkRetryCount === 2 && currentSource !== fallbackUrl) {
+                console.log(`[${camera.id}] Primary stream unreachable, switching to Edge Relay: ${fallbackUrl}`);
+                currentSource = fallbackUrl;
+                hls.loadSource(fallbackUrl);
+                hls.startLoad();
+              } else if (networkRetryCount <= maxRetries) {
+                console.log(`[${camera.id}] HLS network retry ${networkRetryCount}/${maxRetries}...`);
                 hls.startLoad();
               } else {
-                console.warn(`[${camera.id}] Camera RTSP stream unreachable. Seamlessly activating live preview simulation.`);
+                console.warn(`[${camera.id}] Physical stream offline after retries. Activating simulated live preview.`);
                 hls.destroy();
                 hlsRef.current = null;
                 setStreamStatus('simulated');
@@ -254,22 +266,27 @@ export function LiveFeedViewer({
     };
   }, [rtspConfig?.hlsProxyUrl, reconnectCount, feedMode, connectHlsStream]);
 
-  // 24/7 Auto-Reconnect Watchdog: Periodically re-attempt connecting to real RTSP camera feed
+  // 24/7 Auto-Reconnect Watchdog: Only reconnect if genuine freeze/drop occurs without interrupting connecting state
   useEffect(() => {
+    if (feedMode === 'simulated') return;
+
     const watchdog = setInterval(() => {
       const vid = videoRef.current;
-      if (streamStatus !== 'connected' || (vid && (vid.paused || vid.readyState < 2))) {
-        if (vid && vid.paused && vid.readyState >= 2) {
-          vid.play().catch(() => {});
-        } else if (!hlsRef.current || streamStatus === 'error' || streamStatus === 'simulated') {
-          console.log(`[${camera.id}] Auto-reconnecting live stream...`);
-          connectHlsStream();
-        }
+      // If video element is paused while connected, resume
+      if (vid && vid.paused && vid.readyState >= 2 && streamStatus === 'connected') {
+        vid.play().catch(() => {});
+        return;
       }
-    }, 4500);
+
+      // If stream has crashed or simulation was triggered by network drop, attempt reconnecting in background
+      if (streamStatus === 'error' || streamStatus === 'simulated') {
+        console.log(`[${camera.id}] Auto-reconnecting live stream...`);
+        connectHlsStream();
+      }
+    }, 10000);
 
     return () => clearInterval(watchdog);
-  }, [camera.id, connectHlsStream, streamStatus]);
+  }, [camera.id, connectHlsStream, streamStatus, feedMode]);
 
   // Activate Simulated Live Preview Feed
   const handleStartSimulation = () => {
@@ -539,9 +556,11 @@ export function LiveFeedViewer({
                         Port 8000: {diagResult.ports['8000'] ? 'OPEN' : 'CLOSED'}
                       </span>
                     </div>
-                    <p className="text-[10px] text-amber-400/90 pt-1">
-                      💡 Tip: Verify camera PoE power & plug the Ethernet cable into your network switch/PC.
-                    </p>
+                    {!diagResult.reachable && (
+                      <p className="text-[10px] text-amber-400/90 pt-1">
+                        💡 Tip: Verify camera PoE power & plug the Ethernet cable into your network switch/PC.
+                      </p>
+                    )}
                   </div>
                 )}
 

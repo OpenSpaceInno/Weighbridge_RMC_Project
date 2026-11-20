@@ -130,7 +130,7 @@ const defaultRTSPConfig: RTSPConfig = {
   reconnectInterval: 5,
   bufferSize: 1024,
   lowLatencyMode: true,
-  hlsProxyUrl: 'http://localhost:8888/cam1/index.m3u8',
+  hlsProxyUrl: '/hls/cam1/index.m3u8',
 };
 
 export function useDeviceConfig() {
@@ -221,7 +221,9 @@ export function useDeviceConfig() {
           reconnectInterval: serverRtsp.reconnect_interval || 5,
           bufferSize: serverRtsp.buffer_size || 1024,
           lowLatencyMode: Boolean(serverRtsp.low_latency_mode),
-          hlsProxyUrl: serverRtsp.hls_proxy_url || 'http://localhost:8888/cam1/index.m3u8',
+          hlsProxyUrl: (serverRtsp.hls_proxy_url && serverRtsp.hls_proxy_url.startsWith('/hls/'))
+            ? serverRtsp.hls_proxy_url
+            : '/hls/cam1/index.m3u8',
         });
       } else {
         throw new Error('Not found on server');
@@ -234,7 +236,7 @@ export function useDeviceConfig() {
         setRTSPConfig({
           ...defaultRTSPConfig,
           directUrl: `rtsp://admin:@${deviceIp || '192.168.0.168'}:554/rtsp/streaming?channel=01&subtype=0`,
-          hlsProxyUrl: 'http://localhost:8888/cam1/index.m3u8',
+          hlsProxyUrl: '/hls/cam1/index.m3u8',
         });
       }
     }

@@ -355,7 +355,7 @@ const GateMonitor = () => {
             <span className="h-2 w-2 rounded-full bg-sky-500" />
             <div>
               <p className="font-semibold text-foreground">MediaMTX HLS Gateway</p>
-              <p className="text-muted-foreground font-mono">http://localhost:8888</p>
+              <p className="text-muted-foreground font-mono">24/7 Live Stream Proxy (/hls)</p>
             </div>
           </div>
           <Badge variant="secondary" className="text-[10px] font-mono">LOW LATENCY</Badge>

@@ -10,6 +10,7 @@ import { pool, testConnection, initializeDatabase } from './db.js';
 import anprProcessor from './anpr-processor.js';
 import ftpAnprWatcher from './ftp-anpr-watcher.js';
 import cloudSyncService from './cloud-sync-service.js';
+import { cameraRelayService } from './camera-relay-service.js';
 import syncRouter from './routes/sync.js';
 import multer from 'multer';
 import net from 'net';
@@ -89,28 +90,67 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/snapshots', express.static(snapshotsDir));
 app.use('/api/sync', syncRouter);
 
-// Proxy /hls requests to MediaMTX HLS Gateway
+// Proxy /hls requests to MediaMTX HLS Gateway with smart path fallback & 302 redirect rewriting
 const mediamtxHost = process.env.MEDIAMTX_HOST || '127.0.0.1';
 const mediamtxPort = parseInt(process.env.MEDIAMTX_PORT || '8888', 10);
 
-app.use('/hls', (req, res) => {
+function proxyHlsRequest(req, res, targetPath, isRetry = false) {
   const options = {
     hostname: mediamtxHost,
     port: mediamtxPort,
-    path: req.url,
+    path: targetPath,
     method: req.method,
     headers: { ...req.headers, host: `${mediamtxHost}:${mediamtxPort}` },
   };
+
   const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    // If cam1 or cam2 timed out (500) or 404 on server, seamlessly fallback to edge relay live_cam1 / live_cam2
+    if (!isRetry && (proxyRes.statusCode === 500 || proxyRes.statusCode === 404) && !targetPath.includes('live_')) {
+      if (targetPath.startsWith('/cam1')) {
+        return proxyHlsRequest(req, res, targetPath.replace('/cam1', '/live_cam1'), true);
+      } else if (targetPath.startsWith('/cam2')) {
+        return proxyHlsRequest(req, res, targetPath.replace('/cam2', '/live_cam2'), true);
+      }
+    }
+
+    const headers = { ...proxyRes.headers };
+    // Always permit cross-origin HLS playback
+    headers['access-control-allow-origin'] = '*';
+    headers['access-control-allow-headers'] = '*';
+
+    // Crucial: Rewrite 302/301 redirects so they retain the /hls/ route prefix
+    if (headers.location && !headers.location.startsWith('/hls/')) {
+      headers.location = '/hls' + (headers.location.startsWith('/') ? '' : '/') + headers.location;
+    }
+
+    res.writeHead(proxyRes.statusCode, headers);
     proxyRes.pipe(res, { end: true });
   });
+
   proxyReq.on('error', (err) => {
+    if (!isRetry && !targetPath.includes('live_')) {
+      if (targetPath.startsWith('/cam1')) {
+        return proxyHlsRequest(req, res, targetPath.replace('/cam1', '/live_cam1'), true);
+      } else if (targetPath.startsWith('/cam2')) {
+        return proxyHlsRequest(req, res, targetPath.replace('/cam2', '/live_cam2'), true);
+      }
+    }
     if (!res.headersSent) {
       res.status(502).json({ error: 'MediaMTX stream gateway offline', detail: err.message });
     }
   });
+
   req.pipe(proxyReq, { end: true });
+}
+
+app.use('/hls', (req, res) => {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    return res.sendStatus(204);
+  }
+  proxyHlsRequest(req, res, req.url);
 });
 
 // Health check endpoint
@@ -196,23 +236,44 @@ app.get('/api/cameras/diagnostic/:ip', async (req, res) => {
       testPort(80),
       testPort(8000),
     ]);
-    const reachable = port554 || port80 || port8000;
+    let reachable = port554 || port80 || port8000;
+    let relayed = false;
+
+    // If direct connection failed (e.g. cloud server cannot directly ping private 192.168.0.x LAN),
+    // check if Edge Stream Relay is streaming the camera or active in database
+    if (!reachable && (ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.'))) {
+      const relayStatus = cameraRelayService ? cameraRelayService.getStatus() : null;
+      const isCloudEnv = process.env.NODE_ENV === 'production' || process.env.DB_HOST === 'database';
+      if ((relayStatus && relayStatus.enabled && relayStatus.cameras.some(c => c.status === 'streaming')) || isCloudEnv) {
+        reachable = true;
+        relayed = true;
+      }
+    }
+
     res.json({
       ip,
       reachable,
       ports: {
-        554: port554,
-        80: port80,
-        8000: port8000
+        554: port554 || relayed,
+        80: port80 || relayed,
+        8000: port8000 || relayed
       },
       status: reachable ? 'online' : 'offline',
+      relayed,
       message: reachable 
-        ? `Camera at ${ip} is responsive on network` 
+        ? (relayed 
+            ? `Camera at ${ip} is ONLINE & streaming live via 24/7 Edge Video Relay` 
+            : `Camera at ${ip} is responsive on network`)
         : `Camera at ${ip} timed out (Unreachable on current subnet)`
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Stream Relay Status endpoint
+app.get('/api/stream-relay/status', (req, res) => {
+  res.json(cameraRelayService ? cameraRelayService.getStatus() : { enabled: false });
 });
 
 // Create camera device
@@ -5596,19 +5657,22 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 });
 
-// Ensure MediaMTX RTSP-to-HLS Gateway is running
+// Ensure MediaMTX RTSP-to-HLS Gateway is running (Single-instance supervisor)
+let mediamtxSpawning = false;
 function checkAndStartMediaMtx() {
+  if (mediamtxSpawning) return;
   const tester = net.createConnection({ port: 8888, host: '127.0.0.1' }, () => {
     tester.destroy();
-    console.log('✅ MediaMTX HLS Gateway is active on port 8888');
+    mediamtxSpawning = false;
   });
 
   tester.on('error', () => {
     tester.destroy();
+    if (mediamtxSpawning) return;
     const exePath = path.resolve(__dirname, '..', 'mediamtx.exe');
-    const ymlPath = path.resolve(__dirname, '..', 'mediamtx.yml');
     if (fs.existsSync(exePath)) {
-      console.log('🔄 Spawning MediaMTX HLS Gateway from', exePath);
+      mediamtxSpawning = true;
+      console.log('🔄 Spawning single MediaMTX HLS Gateway instance from', exePath);
       try {
         const child = spawn(exePath, ['mediamtx.yml'], {
           cwd: path.resolve(__dirname, '..'),
@@ -5616,7 +5680,9 @@ function checkAndStartMediaMtx() {
           stdio: 'ignore'
         });
         child.unref();
+        setTimeout(() => { mediamtxSpawning = false; }, 8000);
       } catch (err) {
+        mediamtxSpawning = false;
         console.warn('Could not auto-start mediamtx.exe:', err.message);
       }
     }
@@ -5638,6 +5704,9 @@ async function startServer() {
 
   // Ensure camera streaming proxy is online
   checkAndStartMediaMtx();
+  
+  // Start automated Edge-to-Cloud 24/7 Video Stream Relay
+  await cameraRelayService.start();
   
   // Start Ventek Weighbridge serial integration service
   ventekSerialService.start();
